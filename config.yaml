@@ -1,0 +1,27 @@
+# PersonalAI-Assistant configuration
+# Provider: voicechat | modular | hybrid
+provider: voicechat
+
+# --- modular pipeline ---
+asr_backend: whisper_server
+llm_base_url: http://127.0.0.1:8081/v1
+llm_model: hy-mt2
+tts_backend: omnivoice
+
+# --- hybrid (vision via separate VLM) ---
+vlm_base_url: http://127.0.0.1:8082/v1
+vlm_model: qwen2-vl
+
+# --- voicechat ---
+voicechat_use_funchead: true
+voicechat_port: 8123
+
+# --- audio ---
+push_to_talk_seconds: 0   # 0 = record until Enter
+
+# --- autonomy ---
+autonomy: full            # full | auto_safe | confirm
+kill_switch_keys: ctrl+alt+q
+
+# --- ui ---
+dashboard_port: 8765

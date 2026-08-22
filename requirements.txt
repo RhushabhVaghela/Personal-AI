@@ -1,0 +1,14 @@
+# Core
+requests>=2.31
+pyyaml>=6.0
+websockets>=12.0
+pynput>=1.7.6
+mss>=9.0
+Pillow>=10.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.26
+
+# Optional backends
+edge-tts>=6.1.0   # modular TTS fallback (free, online)
+# dxcam; psutil  # optional capture/monitoring extras
