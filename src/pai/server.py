@@ -21,6 +21,38 @@ log = logging.getLogger("pai.server")
 
 STATIC = Path(__file__).resolve().parents[2] / "static"
 
+# Single shared provider across dashboard connections — prevents model
+# processes (and VRAM) piling up on browser refreshes/reconnects.
+_active_provider = None
+_active_name: str | None = None
+_provider_lock = asyncio.Lock()
+
+
+async def _get_shared_provider(name: str):
+    """Return the shared provider instance, switching cleanly if needed.
+
+    Guarantees the OLD model process is fully stopped (RAM/VRAM freed)
+    before the new one loads.
+    """
+    global _active_provider, _active_name
+    async with _provider_lock:
+        if _active_provider is not None and _active_name == name:
+            return _active_provider
+        if _active_provider is not None:
+            log.info("switching provider %s -> %s; stopping old model",
+                     _active_name, name)
+            if hasattr(_active_provider, "stop"):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _active_provider.stop)
+            _active_provider = None
+            _active_name = None
+        prov = providers.get_provider(name)
+        if hasattr(prov, "start"):
+            await asyncio.get_running_loop().run_in_executor(None, prov.start)
+        _active_provider = prov
+        _active_name = name
+        return prov
+
 
 class AssistantSession:
     """One connected dashboard = one session."""
@@ -115,8 +147,36 @@ class AssistantSession:
         if self.cfg.provider == "modular":
             await self._turn_modular_text(text)
         else:
-            await self.send("reply",
-                            text="(text input needs the modular provider)")
+            # voicechat/hybrid accept only audio turns: synthesize the text
+            # to a wav first, then run it through the normal voice turn.
+            loop = asyncio.get_running_loop()
+            await self.send("status", text="synthesizing text input...")
+            try:
+                wav = await loop.run_in_executor(None, self._tts_input, text)
+            except Exception as exc:  # noqa: BLE001
+                await self.send("reply",
+                                text=f"(text-to-speech failed: {exc})")
+                return
+            await self._turn(wav)
+
+    def _tts_input(self, text: str) -> Path:
+        """Speak the user's typed text into a 16k mono wav for the model."""
+        import subprocess
+        import tempfile
+        import asyncio
+
+        async def _synth():
+            import edge_tts
+            tmp = Path(tempfile.gettempdir()) / "pai_text_input.mp3"
+            await edge_tts.Communicate(text, "en-US-AriaNeural").save(str(tmp))
+            return tmp
+
+        mp3 = asyncio.run(_synth())
+        wav = mp3.with_suffix(".wav")
+        subprocess.run(["ffmpeg", "-y", "-i", str(mp3), "-ar", "16000",
+                        "-ac", "1", str(wav)],
+                       capture_output=True, check=True)
+        return wav
 
     async def _turn_modular_text(self, text: str) -> None:
         loop = asyncio.get_running_loop()
@@ -150,11 +210,8 @@ async def handler(ws) -> None:
                 if msg.get("kind") == "hello":
                     name = msg.get("provider", "voicechat")
                     session = AssistantSession(ws, name)
-                    if hasattr(session.provider, "start"):
-                        await session.send("status", text="loading model...")
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            None, session.provider.start)
+                    await session.send("status", text="loading model...")
+                    session.provider = await _get_shared_provider(name)
                     await session.send("ready",
                                        provider=session.provider.name)
                 continue
@@ -162,11 +219,10 @@ async def handler(ws) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("ws error: %s", exc)
     finally:
-        if session and hasattr(session.provider, "stop"):
-            try:
-                session.provider.stop()
-            except Exception:  # noqa: BLE001
-                pass
+        # NOTE: the shared provider is intentionally NOT stopped on
+        # disconnect — it is reused by the next dashboard connection.
+        # It is stopped only on provider switch (_get_shared_provider)
+        # or server shutdown.
         log.info("dashboard client disconnected")
 
 

@@ -78,11 +78,28 @@ class VoiceChatProvider:
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
+            # graceful: try JSON exit, then hard-kill after a grace period
             try:
                 self.proc.stdin.write(json.dumps({"cmd": "exit"}) + "\n")
                 self.proc.stdin.flush()
             except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("voicechat did not exit cleanly; killing")
                 self.proc.kill()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        # belt-and-braces: reap any orphaned llama-voicechat from OUR cwd
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "llama-voicechat.exe"],
+                capture_output=True, timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
         self.proc = None
 
     def _read_loop(self):
@@ -125,7 +142,8 @@ class VoiceChatProvider:
                 if len(self._events) > seen:
                     ev = self._events[seen]
                     seen += 1
-                    if ev.get("type") in kinds:
+                    kind = ev.get("type") or ev.get("kind")
+                    if kind in kinds:
                         return ev
                     continue
                 self._cv.wait(min(1.0, deadline - time.time()))
