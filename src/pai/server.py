@@ -82,6 +82,14 @@ class AssistantSession:
 
     async def handle(self, msg: dict) -> None:
         kind = msg.get("kind")
+        try:
+            await self._handle(msg, kind)
+        except Exception as exc:  # noqa: BLE001
+            # a failed backend call must NEVER drop the websocket
+            log.error("handle(%s) failed: %s", kind, exc, exc_info=True)
+            await self.send("error", text=f"{kind} failed: {exc}")
+
+    async def _handle(self, msg: dict, kind: str) -> None:
         if kind == "config":
             await self.send("config_ok", provider=self.provider.name,
                             autonomy=self.cfg.autonomy)
@@ -111,24 +119,34 @@ class AssistantSession:
 
     def _to_wav(self, blob: bytes) -> Path:
         import tempfile
-        suffix = ".wav"
+        # sniff container: RIFF (wav), EBML (webm/matroska, what
+        # MediaRecorder produces on Chrome/Edge), ID3/mp3 sync
         if blob[:4] == b"RIFF":
             suffix = ".wav"
-        elif blob[:3] == b"IDC" or b"webm" in blob[:64]:
+        elif blob[:4] == b"\x1a\x45\xdf\xa3":
             suffix = ".webm"
+        elif blob[:3] == b"ID3" or (len(blob) > 2 and blob[0] == 0xFF):
+            suffix = ".mp3"
+        else:
+            suffix = ".webm"  # MediaRecorder default on Chromium
         p = Path(tempfile.gettempdir()) / f"pai_chunk{suffix}"
         p.write_bytes(blob)
-        if suffix == ".webm":
+        log.info("audio chunk: %d bytes, detected %s", len(blob), suffix)
+        if suffix != ".wav":
             p = self._ffmpeg_to_wav(p)
         return p
 
     def _ffmpeg_to_wav(self, p: Path) -> Path:
         import subprocess
         out = p.with_suffix(".wav")
-        subprocess.run(["ffmpeg", "-y", "-i", str(p), "-ar", "16000",
+        r = subprocess.run(["ffmpeg", "-y", "-i", str(p), "-ar", "16000",
                         "-ac", "1", str(out)],
-                       capture_output=True, check=False)
-        return out if out.exists() else p
+                       capture_output=True, timeout=60)
+        if r.returncode != 0 or not out.exists():
+            log.error("ffmpeg convert failed: %s", r.stderr.decode()[-400:])
+            raise RuntimeError("audio conversion failed (is ffmpeg on PATH?)")
+        log.info("converted %s -> wav (%d bytes)", p.suffix, out.stat().st_size)
+        return out
 
     async def _turn(self, wav: Path) -> None:
         if self.cfg.provider == "modular":
@@ -147,11 +165,44 @@ class AssistantSession:
                 await self._send_audio(spoken)
         else:
             loop = asyncio.get_running_loop()
+            log.info("turn: provider=%s wav=%s (%d bytes) — processing",
+                     self.cfg.provider, wav.name, wav.stat().st_size)
+            await self.send("status", text="thinking (model is generating)...")
+            t0 = time.time()
             result = await loop.run_in_executor(
                 None, self.provider.turn, wav, self.executor)
-            await self.send("reply", text=result.get("text", ""))
-            if result.get("audio"):
-                await self._send_audio(Path(result["audio"]))
+            dt = time.time() - t0
+            audio = result.get("audio")
+            log.info("turn: finished in %.1fs, audio=%s", dt, audio)
+            text = result.get("text") or ""
+            if not text and audio:
+                # voicechat replies are audio-only: transcribe so chat shows it
+                await self.send("status", text="transcribing reply...")
+                try:
+                    text = await loop.run_in_executor(
+                        None, self._transcribe, Path(audio))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("reply transcription failed: %s", exc)
+                    text = "(voice reply)"
+                log.info("turn: reply transcript: %s", text[:200])
+            await self.send("reply", text=text or "(empty reply)")
+            if audio:
+                await self._send_audio(Path(audio))
+
+    def _transcribe(self, wav: Path) -> str:
+        """Transcribe a reply wav via the local Whisper server (best-effort)."""
+        try:
+            import requests
+            with open(wav, "rb") as f:
+                r = requests.post(
+                    config.WHISPER_SERVER_URL,
+                    files={"file": (wav.name, f, "audio/wav")},
+                    data={"model": "whisper-1"}, timeout=60)
+            if r.ok:
+                return (r.json().get("text") or "").strip()
+        except Exception:  # noqa: BLE001
+            pass
+        return "(voice reply)"
 
     async def _turn_text(self, text: str) -> None:
         if self.cfg.provider == "modular":

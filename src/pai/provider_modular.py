@@ -28,6 +28,7 @@ class ModularProvider:
     # -- ASR -------------------------------------------------------------------
 
     def transcribe(self, wav_path: Path) -> str:
+        log.info("asr: posting %s to whisper server", wav_path.name)
         with open(wav_path, "rb") as f:
             r = requests.post(
                 config.WHISPER_SERVER_URL,

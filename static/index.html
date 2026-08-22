@@ -95,8 +95,12 @@ function connect(){
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     switch(m.kind){
-      case "ready": $("status").textContent = "ready: "+m.provider; break;
-      case "status": $("status").textContent = m.text; break;
+      case "ready": $("status").textContent = "ready: "+m.provider;
+        logMsg("sys", "— "+m.provider+" ready —"); break;
+      case "status": $("status").textContent = m.text;
+        logMsg("sys", m.text); break;
+      case "error": $("status").textContent = "error";
+        logMsg("sys", "⚠ " + m.text); break;
       case "transcript": logMsg("you", m.text); break;
       case "reply": logMsg("bot", m.text); break;
       case "audio": playAudio(m.data, m.format); break;
@@ -117,12 +121,15 @@ function playAudio(b64, fmt){
   new Audio(`data:${mime};base64,${b64}`).play();
 }
 async function startRec(){
+  if(recorder && recorder.state === "recording") return;
   try{
     const stream = await navigator.mediaDevices.getUserMedia({audio:true});
     recorder = new MediaRecorder(stream);
     chunks = [];
     recorder.ondataavailable = e => chunks.push(e.data);
     recorder.onstop = () => {
+      $("status").textContent = "sending audio...";
+      logMsg("sys", "🎙 sent (" + (blobsSize()/1024).toFixed(0) + " KB)");
       const blob = new Blob(chunks, {type: recorder.mimeType});
       const fr = new FileReader();
       fr.onload = () => ws.send(JSON.stringify(
@@ -132,15 +139,22 @@ async function startRec(){
     };
     recorder.start();
     $("mic").classList.add("rec"); $("mic").textContent = "⏹ Release";
+    $("status").textContent = "recording...";
   }catch(err){ logMsg("sys", "mic error: " + err.message); }
 }
+function blobsSize(){ return chunks.reduce((a,c)=>a+c.size,0); }
 function stopRec(){
-  if(recorder && recorder.state !== "inactive") recorder.stop();
+  if(recorder && recorder.state === "recording"){
+    if(blobsSize() === 0){ logMsg("sys","🎙 nothing recorded"); }
+    recorder.stop();
+  }
   $("mic").classList.remove("rec"); $("mic").textContent = "🎙 Hold";
 }
-$("mic").addEventListener("mousedown", startRec);
-$("mic").addEventListener("mouseup", stopRec);
-$("mic").addEventListener("mouseleave", () => recorder && stopRec());
+$("mic").addEventListener("pointerdown", e => { e.preventDefault(); startRec(); });
+$("mic").addEventListener("pointerup", stopRec);
+$("mic").addEventListener("pointerleave", stopRec);
+$("mic").style.userSelect = "none";
+$("mic").style.touchAction = "none";
 $("send").onclick = () => {
   const t = $("text-in").value.trim(); if(!t) return;
   logMsg("you", t);
