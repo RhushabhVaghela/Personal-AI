@@ -12,6 +12,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -226,9 +229,61 @@ async def handler(ws) -> None:
         log.info("dashboard client disconnected")
 
 
+async def _shutdown_global() -> None:
+    """Full cleanup: stop the shared model, sweep orphans. Idempotent."""
+    global _active_provider, _active_name
+    prov = _active_provider
+    _active_provider = None
+    _active_name = None
+    if prov is not None and hasattr(prov, "stop"):
+        log.info("shutdown: stopping model provider...")
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, prov.stop)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("shutdown: provider stop failed: %s", exc)
+    # belt-and-braces: kill any orphaned model processes
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "llama-voicechat.exe"],
+                       capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+    log.info("shutdown: clean — models stopped, RAM/VRAM released")
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def release_port(port: int) -> None:
+    """Free a port held by a stale process: find the PID and kill it."""
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True,
+            timeout=15).stdout
+    except Exception as exc:  # noqa: BLE001
+        log.warning("release_port(%d): netstat failed: %s", port, exc)
+        return
+    pids = set()
+    for line in out.splitlines():
+        if f":{port}" in line and "LISTENING" in line.upper():
+            parts = line.split()
+            if parts:
+                pids.add(parts[-1])
+    for pid in pids:
+        if pid == str(os.getpid()):
+            continue
+        log.info("release_port(%d): killing stale PID %s", port, pid)
+        subprocess.run(["taskkill", "/F", "/PID", pid],
+                       capture_output=True, timeout=10)
+    if pids:
+        time.sleep(0.5)  # let the OS release the socket
+
+
 async def main() -> None:
+    import signal
     import websockets
-    from websockets.legacy.server import serve as legacy_serve  # type: ignore
     logging.basicConfig(level=logging.INFO)
     cfg = config.get_config()
 
@@ -253,12 +308,32 @@ async def main() -> None:
                                          ("Content-Length", str(len(body)))]),
                         body=body)
 
+    # If a stale instance holds our port (e.g. previous crash), free it.
+    if _port_in_use(cfg.dashboard_port):
+        log.warning("port %d in use — releasing stale instance first",
+                    cfg.dashboard_port)
+        release_port(cfg.dashboard_port)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    sigs = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        sigs.append(signal.SIGBREAK)  # Windows Ctrl+Break / CTRL_BREAK_EVENT
+    for sig in sigs:
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows: loop.add_signal_handler unsupported — use signal.signal
+            signal.signal(sig, lambda *_: stop.set())
+
     async with websockets.serve(handler, "127.0.0.1", cfg.dashboard_port,
                                 process_request=process_request,
                                 max_size=32 * 1024 * 1024):
         log.info("dashboard on http://127.0.0.1:%d (ws on same port)",
                  cfg.dashboard_port)
-        await asyncio.Future()
+        await stop.wait()          # interrupted (Ctrl+C / SIGTERM / close)
+    # leaving the `async with` closes the listener and frees the port
+    await _shutdown_global()       # stop model, free RAM/VRAM, sweep orphans
 
 
 if __name__ == "__main__":
