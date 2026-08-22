@@ -85,6 +85,13 @@ class AssistantSession:
         if kind == "config":
             await self.send("config_ok", provider=self.provider.name,
                             autonomy=self.cfg.autonomy)
+        elif kind == "switch":
+            # switch the shared provider without dropping the connection
+            name = msg.get("provider", "voicechat")
+            await self.send("status", text=f"switching to {name}...")
+            self.provider = await _get_shared_provider(name)
+            self.cfg.provider = name
+            await self.send("ready", provider=self.provider.name)
         elif kind == "audio_chunk":
             # browser sends base64 wav/webm blob of the utterance
             data = base64.b64decode(msg.get("data", ""))

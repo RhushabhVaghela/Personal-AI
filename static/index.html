@@ -152,7 +152,10 @@ $("text-in").addEventListener("keydown", e => {
 });
 $("snap").onclick = () => ws.send(JSON.stringify({kind:"screenshot"}));
 $("killbtn").onclick = () => ws.send(JSON.stringify({kind:"kill"}));
-$("provider").onchange = () => location.reload();
+$("provider").onchange = () => {
+  $("status").textContent = "switching...";
+  ws.send(JSON.stringify({kind:"switch", provider:$("provider").value}));
+};
 connect();
 </script>
 </body>

@@ -80,7 +80,7 @@ class VoiceChatProvider:
         if self.proc and self.proc.poll() is None:
             # graceful: try JSON exit, then hard-kill after a grace period
             try:
-                self.proc.stdin.write(json.dumps({"cmd": "exit"}) + "\n")
+                self.proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
                 self.proc.stdin.flush()
             except Exception:  # noqa: BLE001
                 pass
@@ -154,37 +154,41 @@ class VoiceChatProvider:
     def turn(self, wav_path: Path, executor: pai_tools.ToolExecutor,
              image_path: Path | None = None,
              max_tool_rounds: int = 5) -> dict:
-        """Send one voice turn. Returns {"audio": path?, "text": str, "tool_calls": [...]}"""
-        for round_no in range(max_tool_rounds + 1):
-            event = {"cmd": "turn", "input": str(wav_path)}
-            if image_path:
-                event["image"] = str(image_path)
-            if round_no > 0 and self._events:
-                pass  # follow-up rounds carry tool results via transcript file
-            self._send(event)
-            ev = self._wait_event(
-                ("audio", "text", "tool_call", "tool_calls", "final"), timeout=180)
-            if ev is None:
-                return {"text": "(timeout waiting for voicechat)", "tool_calls": []}
-            calls = ev.get("tool_calls") or (
-                [ev["tool_call"]] if ev.get("tool_call") else [])
-            if calls:
-                results = [executor.execute(c.get("name", c.get("tool", "")),
-                                            c.get("params", c.get("arguments", {})))
-                           for c in calls]
-                # write results to transcript so the model sees them next round
-                import tempfile
-                rf = Path(tempfile.gettempdir()) / "pai_tool_results.json"
-                rf.write_text(json.dumps(results, indent=2, default=str),
-                              encoding="utf-8")
-                self._send({"cmd": "tool_results", "path": str(rf)})
-                continue
-            return {
-                "audio": ev.get("audio_path") or ev.get("audio"),
-                "text": ev.get("text") or ev.get("transcript") or "",
-                "tool_calls": [],
-            }
-        return {"text": "(max tool rounds reached)", "tool_calls": []}
+        """Send one voice turn using the exe's file-based protocol.
+
+        Protocol (matches push_to_talk.py):
+          -> {"cmd":"turn", "audio": <in.wav>, "out": <out.wav>}
+          <- reply WAV written to <out.wav> when generation finishes
+        """
+        out_wav = config.VOICECHAT_DIR / "pai_answer.wav"
+        if out_wav.exists():
+            out_wav.unlink()
+        event = {"cmd": "turn", "audio": str(wav_path), "out": str(out_wav)}
+        if image_path:
+            event["image"] = str(image_path)
+        self._send(event)
+
+        # wait for the reply wav to appear and stop growing
+        deadline = time.time() + 180
+        last_size = -1
+        stable = 0
+        while time.time() < deadline:
+            if self.proc and self.proc.poll() is not None:
+                return {"text": "(voicechat exited)", "tool_calls": [],
+                        "audio": None}
+            if out_wav.exists():
+                size = out_wav.stat().st_size
+                if size == last_size and size > 1000:
+                    stable += 1
+                    if stable >= 3:            # ~1.5s of no growth = done
+                        return {"audio": str(out_wav), "text": "",
+                                "tool_calls": []}
+                else:
+                    stable = 0
+                last_size = size
+            time.sleep(0.5)
+        return {"text": "(timeout waiting for voicechat reply)", "tool_calls": [],
+                "audio": None}
 
     def _send(self, event: dict):
         assert self.proc and self.proc.stdin
