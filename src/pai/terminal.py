@@ -26,22 +26,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = config.get_config()
-    if args.provider:
-        cfg.provider = args.provider
-    if args.autonomy:
-        cfg.autonomy = args.autonomy
 
-    ks = input_control.get_kill_switch(cfg.kill_switch_keys.replace("+", " + "))
+    ks = input_control.get_kill_switch(cfg.kill_switch_keys)
     print("=" * 60)
-    print(f" PersonalAI-Assistant | provider={cfg.provider} | "
-          f"autonomy={cfg.autonomy}")
+    print(f" PersonalAI-Assistant | autonomy={cfg.autonomy}")
     print(f" KILL-SWITCH: {cfg.kill_switch_keys} (toggle anytime)")
     print("=" * 60)
 
-    provider = providers.get_provider(cfg.provider)
+    name = args.provider or cfg.provider
+    if args.autonomy:
+        cfg.autonomy = args.autonomy
+
+    provider = providers.get_provider(name)
     if hasattr(provider, "start"):
-        print("Loading model (first load can take a minute)...")
+        print(f"Loading {name} model (first load can take a minute)...")
         provider.start()
+        if hasattr(provider, "is_running") and not provider.is_running():
+            print("⚠ model failed to start — check the log above")
+            return
 
     executor = tools.ToolExecutor(autonomy=cfg.autonomy)
 
@@ -53,30 +55,38 @@ def main() -> None:
         if cmd in ("q", "quit", "exit"):
             break
         if ks.engaged:
-            print("⚠️ Kill-switch engaged — press it again to release.")
+            print("⚠ Kill-switch engaged — press it again to release.")
             continue
 
         wav = (audio.record_seconds(args.seconds or cfg.push_to_talk_seconds)
-               if args.seconds or cfg.push_to_talk_seconds
-               else audio.record_until_enter())
+               if args.seconds else audio.record_until_enter())
         if ks.engaged:
-            print("⚠️ Kill-switch engaged during recording; skipping turn.")
+            print("⚠ Kill-switch engaged during recording; skipping turn.")
             continue
 
         try:
-            if cfg.provider == "modular":
+            if provider.name == "modular":
                 transcript = provider.transcribe(wav)
                 print(f"🧑 You: {transcript}")
                 result = provider.think(transcript, executor)
                 print(f"🤖 Assistant: {result['text']}")
                 if result.get("text"):
-                    out = Path("logs/reply.wav")
+                    out = Path(__file__).resolve().parents[2] / "logs" / "reply.wav"
                     out.parent.mkdir(exist_ok=True)
                     spoken = provider.speak(result["text"], out)
                     audio.play_any(spoken)
             else:
                 result = provider.turn(wav, executor)
-                print(f"🤖 Assistant: {result.get('text') or result.get('audio')}")
+                text = result.get("text")
+                if not text and result.get("audio"):
+                    try:
+                        text = "(voice reply — start whisper server for transcript)"
+                        from .provider_modular import ModularProvider
+                        text = ModularProvider().transcribe(
+                            Path(result["audio"]))
+                    except Exception:
+                        pass
+                print(f"🤖 Assistant: {text or '(no reply)'}")
                 if result.get("audio"):
                     audio.play_any(Path(result["audio"]))
         except KeyboardInterrupt:

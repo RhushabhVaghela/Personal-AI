@@ -23,12 +23,15 @@ from . import config, input_control, providers, tools
 log = logging.getLogger("pai.server")
 
 STATIC = Path(__file__).resolve().parents[2] / "static"
+ROOT = Path(__file__).resolve().parents[2]
+LOG_DIR = ROOT / "logs"
 
 # Single shared provider across dashboard connections — prevents model
 # processes (and VRAM) piling up on browser refreshes/reconnects.
 _active_provider = None
 _active_name: str | None = None
 _provider_lock = asyncio.Lock()
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 async def _get_shared_provider(name: str):
@@ -39,7 +42,8 @@ async def _get_shared_provider(name: str):
     """
     global _active_provider, _active_name
     async with _provider_lock:
-        if _active_provider is not None and _active_name == name:
+        if _active_provider is not None and _active_name == name \
+                and getattr(_active_provider, "is_running", lambda: True)():
             return _active_provider
         if _active_provider is not None:
             log.info("switching provider %s -> %s; stopping old model",
@@ -60,19 +64,35 @@ async def _get_shared_provider(name: str):
 class AssistantSession:
     """One connected dashboard = one session."""
 
-    def __init__(self, ws, provider_name: str):
+    def __init__(self, ws):
         self.ws = ws
         self.cfg = config.get_config()
-        self.cfg.provider = provider_name
-        self.provider = providers.get_provider(provider_name)
+        # NOTE: never mutate the global config singleton per-session —
+        # each turn resolves its provider explicitly.
         self.executor = tools.ToolExecutor(
             autonomy=self.cfg.autonomy,
-            on_screenshot=self._push_screenshot)
-        self.history: list[dict] = []
+            on_screenshot=self._push_screenshot,
+            on_event=self._push_tool_event)
         self.latest_png: bytes | None = None
+
+    @property
+    def provider(self):
+        return _active_provider
 
     def _push_screenshot(self, png: bytes) -> None:
         self.latest_png = png
+
+    def _push_tool_event(self, entry: dict) -> None:
+        """Broadcast tool activity to the dashboard (#tools panel).
+
+        Called from worker threads — must hop to the main event loop.
+        """
+        line = f"{entry['tool']}({json.dumps(entry['params'])[:60]}) -> " \
+               f"{'OK' if entry.get('ok') else entry.get('result')}"
+        if _MAIN_LOOP is not None and _MAIN_LOOP.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.send("tool", text=line, ok=bool(entry.get("ok"))),
+                _MAIN_LOOP)
 
     async def send(self, kind: str, **data) -> None:
         try:
@@ -91,31 +111,33 @@ class AssistantSession:
 
     async def _handle(self, msg: dict, kind: str) -> None:
         if kind == "config":
-            await self.send("config_ok", provider=self.provider.name,
+            await self.send("config_ok",
+                            provider=_active_name or "none",
                             autonomy=self.cfg.autonomy)
         elif kind == "switch":
             # switch the shared provider without dropping the connection
             name = msg.get("provider", "voicechat")
             await self.send("status", text=f"switching to {name}...")
-            self.provider = await _get_shared_provider(name)
-            self.cfg.provider = name
-            await self.send("ready", provider=self.provider.name)
+            await _get_shared_provider(name)
+            await self.send("ready", provider=name)
         elif kind == "audio_chunk":
-            # browser sends base64 wav/webm blob of the utterance
             data = base64.b64decode(msg.get("data", ""))
             wav = self._to_wav(data)
             await self._turn(wav)
         elif kind == "text":
             await self._turn_text(msg.get("text", ""))
         elif kind == "screenshot":
-            entry = self.executor.execute("screenshot", {})
+            self.executor.execute("screenshot", {})
             if self.latest_png:
                 await self.send("screenshot",
-                                image=base64.b64encode(self.latest_png).decode())
+                                image=base64.b64encode(
+                                    self.latest_png).decode())
         elif kind == "kill":
             ks = input_control.get_kill_switch()
-            ks._trigger()
+            ks.toggle()
             await self.send("kill_state", engaged=ks.engaged)
+
+    # -- audio plumbing ---------------------------------------------------------
 
     def _to_wav(self, blob: bytes) -> Path:
         import tempfile
@@ -137,40 +159,49 @@ class AssistantSession:
         return p
 
     def _ffmpeg_to_wav(self, p: Path) -> Path:
-        import subprocess
         out = p.with_suffix(".wav")
         r = subprocess.run(["ffmpeg", "-y", "-i", str(p), "-ar", "16000",
-                        "-ac", "1", str(out)],
-                       capture_output=True, timeout=60)
+                            "-ac", "1", str(out)],
+                           capture_output=True, timeout=60)
         if r.returncode != 0 or not out.exists():
             log.error("ffmpeg convert failed: %s", r.stderr.decode()[-400:])
             raise RuntimeError("audio conversion failed (is ffmpeg on PATH?)")
-        log.info("converted %s -> wav (%d bytes)", p.suffix, out.stat().st_size)
+        log.info("converted %s -> wav (%d bytes)",
+                 p.suffix, out.stat().st_size)
         return out
 
+    # -- turns -------------------------------------------------------------------
+
+    async def _current_provider(self):
+        if _active_provider is None:
+            raise RuntimeError("no active provider — say hello first")
+        return _active_provider
+
     async def _turn(self, wav: Path) -> None:
-        if self.cfg.provider == "modular":
-            loop = asyncio.get_running_loop()
+        provider = await self._current_provider()
+        loop = asyncio.get_running_loop()
+        if provider.name == "modular":
+            await self.send("status", text="transcribing (Whisper)...")
             transcript = await loop.run_in_executor(
-                None, self.provider.transcribe, wav)
+                None, provider.transcribe, wav)
             await self.send("transcript", text=transcript)
+            await self.send("status", text="thinking...")
             result = await loop.run_in_executor(
-                None, self.provider.think, transcript, self.executor)
+                None, provider.think, transcript, self.executor)
             await self.send("reply", text=result["text"])
-            out = Path("logs/reply.wav")
-            out.parent.mkdir(exist_ok=True)
             if result["text"]:
+                await self.send("status", text="speaking (TTS)...")
                 spoken = await loop.run_in_executor(
-                    None, self.provider.speak, result["text"], out)
+                    None, provider.speak, result["text"],
+                    LOG_DIR / "reply.wav")
                 await self._send_audio(spoken)
         else:
-            loop = asyncio.get_running_loop()
             log.info("turn: provider=%s wav=%s (%d bytes) — processing",
-                     self.cfg.provider, wav.name, wav.stat().st_size)
+                     provider.name, wav.name, wav.stat().st_size)
             await self.send("status", text="thinking (model is generating)...")
             t0 = time.time()
             result = await loop.run_in_executor(
-                None, self.provider.turn, wav, self.executor)
+                None, provider.turn, wav, self.executor)
             dt = time.time() - t0
             audio = result.get("audio")
             log.info("turn: finished in %.1fs, audio=%s", dt, audio)
@@ -205,8 +236,20 @@ class AssistantSession:
         return "(voice reply)"
 
     async def _turn_text(self, text: str) -> None:
-        if self.cfg.provider == "modular":
-            await self._turn_modular_text(text)
+        provider = await self._current_provider()
+        if provider.name == "modular":
+            loop = asyncio.get_running_loop()
+            await self.send("transcript", text=text)
+            await self.send("status", text="thinking...")
+            result = await loop.run_in_executor(
+                None, provider.think, text, self.executor)
+            await self.send("reply", text=result["text"])
+            if result["text"]:
+                await self.send("status", text="speaking (TTS)...")
+                spoken = await loop.run_in_executor(
+                    None, provider.speak, result["text"],
+                    LOG_DIR / "reply.wav")
+                await self._send_audio(spoken)
         else:
             # voicechat/hybrid accept only audio turns: synthesize the text
             # to a wav first, then run it through the normal voice turn.
@@ -222,9 +265,7 @@ class AssistantSession:
 
     def _tts_input(self, text: str) -> Path:
         """Speak the user's typed text into a 16k mono wav for the model."""
-        import subprocess
         import tempfile
-        import asyncio
 
         async def _synth():
             import edge_tts
@@ -234,23 +275,12 @@ class AssistantSession:
 
         mp3 = asyncio.run(_synth())
         wav = mp3.with_suffix(".wav")
-        subprocess.run(["ffmpeg", "-y", "-i", str(mp3), "-ar", "16000",
-                        "-ac", "1", str(wav)],
-                       capture_output=True, check=True)
+        r = subprocess.run(["ffmpeg", "-y", "-i", str(mp3), "-ar", "16000",
+                            "-ac", "1", str(wav)],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0 or not wav.exists():
+            raise RuntimeError("tts conversion failed (is ffmpeg on PATH?)")
         return wav
-
-    async def _turn_modular_text(self, text: str) -> None:
-        loop = asyncio.get_running_loop()
-        await self.send("transcript", text=text)
-        result = await loop.run_in_executor(
-            None, self.provider.think, text, self.executor)
-        await self.send("reply", text=result["text"])
-        out = Path("logs/reply.wav")
-        out.parent.mkdir(exist_ok=True)
-        if result["text"]:
-            spoken = await loop.run_in_executor(
-                None, self.provider.speak, result["text"], out)
-            await self._send_audio(spoken)
 
     async def _send_audio(self, p: Path) -> None:
         try:
@@ -270,11 +300,10 @@ async def handler(ws) -> None:
             if session is None:
                 if msg.get("kind") == "hello":
                     name = msg.get("provider", "voicechat")
-                    session = AssistantSession(ws, name)
+                    session = AssistantSession(ws)
                     await session.send("status", text="loading model...")
-                    session.provider = await _get_shared_provider(name)
-                    await session.send("ready",
-                                       provider=session.provider.name)
+                    await _get_shared_provider(name)
+                    await session.send("ready", provider=name)
                 continue
             await session.handle(msg)
     except Exception as exc:  # noqa: BLE001
@@ -342,22 +371,28 @@ def release_port(port: int) -> None:
 async def main() -> None:
     import signal
     import websockets
+    global _MAIN_LOOP
     logging.basicConfig(level=logging.INFO)
     cfg = config.get_config()
 
+    LOG_DIR.mkdir(exist_ok=True)
+
     def process_request(connection, request):
         """Serve the dashboard over HTTP on the same port as the WS."""
-        import http.server
         path = request.path
         if path == "/ws" or path.startswith("/ws?"):
             return None
-        fpath = STATIC / ("index.html" if path in ("/", "") else path.lstrip("/"))
-        if not fpath.is_file():
+        from urllib.parse import unquote
+        rel = unquote(path.lstrip("/")) if path not in ("/", "") else "index.html"
+        fpath = (STATIC / rel).resolve()
+        # path-traversal guard: only serve files inside static/
+        if not str(fpath).startswith(str(STATIC.resolve())) or not fpath.is_file():
             fpath = STATIC / "index.html"
         body = fpath.read_bytes()
         ctype = ("text/html" if fpath.suffix == ".html"
                  else "application/javascript" if fpath.suffix == ".js"
                  else "text/css" if fpath.suffix == ".css"
+                 else "image/png" if fpath.suffix == ".png"
                  else "application/octet-stream")
         from websockets.http11 import Response
         from websockets.datastructures import Headers
@@ -374,15 +409,24 @@ async def main() -> None:
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
+    _MAIN_LOOP = loop  # worker threads use this to emit tool events
     sigs = [signal.SIGINT, signal.SIGTERM]
     if hasattr(signal, "SIGBREAK"):
         sigs.append(signal.SIGBREAK)  # Windows Ctrl+Break / CTRL_BREAK_EVENT
-    for sig in sigs:
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):
-            # Windows: loop.add_signal_handler unsupported — use signal.signal
-            signal.signal(sig, lambda *_: stop.set())
+    import threading as _threading
+    if _threading.current_thread() is not _threading.main_thread():
+        log.info("running in a worker thread — skipping signal handlers "
+                 "(shutdown via process exit)")
+    else:
+        for sig in sigs:
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError):
+                # Windows: loop.add_signal_handler unsupported — use signal.signal
+                try:
+                    signal.signal(sig, lambda *_: stop.set())
+                except (ValueError, OSError):
+                    log.warning("could not install handler for %s", sig)
 
     async with websockets.serve(handler, "127.0.0.1", cfg.dashboard_port,
                                 process_request=process_request,

@@ -1,4 +1,4 @@
-"""Screen capture with DXGI → MSS → PIL fallback chain.
+"""Screen capture with MSS → PIL fallback chain.
 
 Adapted from D:/Agents-and-other-repos/Computer-Use/src/screen_capture.py
 """
@@ -9,7 +9,6 @@ import io
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 log = logging.getLogger("pai.capture")
 
@@ -41,46 +40,61 @@ class ScreenCapture:
     def __init__(self, backend: str = "auto", cache_ttl: float = 0.1):
         self.backend = backend
         self.cache_ttl = cache_ttl
-        self._cache = None          # (timestamp, bytes)
-        self._cache_hash = None
+        self._cache = None          # (timestamp, bytes of full-res PNG)
         self.stats = CaptureStats()
 
     # -- public API ---------------------------------------------------------
 
-    def capture_png(self, monitor: int = 0, max_width: int | None = None) -> bytes:
-        """Capture the screen as PNG bytes (monitor 0 = all monitors virtual desktop)."""
-        # cache check
-        if (
-            self._cache is not None
-            and (time.time() - self._cache[0]) < self.cache_ttl
-        ):
-            return self._cache[1]
+    def capture_png(self, monitor: int = 0,
+                    max_width: int | None = None) -> bytes:
+        """Capture the screen as PNG bytes.
 
-        png = self._do_capture(monitor, max_width)
-        self._cache = (time.time(), png)
+        monitor 0 = all monitors virtual desktop.
+        max_width: downscale so the image is at most this many px wide
+        (keeps VLM payloads small). Cache stores the FULL-RES frame;
+        resizing is applied per call.
+        """
+        full = self._capture_full(monitor)
+
+        if max_width:
+            png = self._resize(full, int(max_width))
+        else:
+            png = full
+
         self.stats.n_captures += 1
         self.stats.last_capture_ms = self._capture_ms
         self.stats.backend_use[self._backend_used] = (
-            self.stats.backend_use.get(self._backend_used, 0) + 1
-        )
+            self.stats.backend_use.get(self._backend_used, 0) + 1)
         return png
 
     def capture_pil(self, monitor: int = 0, max_width: int | None = None):
-        """Capture as a PIL Image (may be None if PIL unavailable)."""
+        """Capture as a PIL Image (None if PIL unavailable)."""
         if not HAS_PIL:
             return None
-        import io as _io
-        return Image.open(_io.BytesIO(self.capture_png(monitor, max_width)))
+        return Image.open(io.BytesIO(self.capture_png(monitor, max_width)))
 
     def screenshot_hash(self) -> str:
-        return hashlib.sha256(self.capture_png()).hexdigest()[:16]
+        return hashlib.sha256(self._capture_full(0)).hexdigest()[:16]
+
+    def last_frame(self) -> bytes | None:
+        """The most recent full-res frame, without forcing a new capture."""
+        if self._cache and (time.time() - self._cache[0]) < self.cache_ttl * 100:
+            return self._cache[1]
+        return None
 
     # -- internals ----------------------------------------------------------
 
     _backend_used = "none"
     _capture_ms = 0.0
 
-    def _do_capture(self, monitor: int, max_width: int | None) -> bytes:
+    def _capture_full(self, monitor: int) -> bytes:
+        # cache check (full-res frames only, short TTL)
+        if (
+            self._cache is not None
+            and (time.time() - self._cache[0]) < self.cache_ttl
+        ):
+            return self._cache[1]
+
         order = [self.backend] if self.backend != "auto" else ["mss", "pil"]
         for backend in order:
             try:
@@ -102,11 +116,29 @@ class ScreenCapture:
                     continue
                 self._capture_ms = (time.perf_counter() - t0) * 1000
                 self._backend_used = backend
+                self._cache = (time.time(), png)
                 return png
             except Exception as exc:  # noqa: BLE001
                 log.warning("capture backend %s failed: %s", backend, exc)
                 self.stats.n_failures += 1
         raise RuntimeError("all screen capture backends failed")
+
+    def _resize(self, png: bytes, max_width: int) -> bytes:
+        if not HAS_PIL:
+            return png
+        try:
+            img = Image.open(io.BytesIO(png))
+            if img.width <= max_width:
+                return png
+            ratio = max_width / img.width
+            img = img.resize((max_width, int(img.height * ratio)),
+                             Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            return buf.getvalue()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("resize failed: %s", exc)
+            return png
 
 
 # module-level singleton

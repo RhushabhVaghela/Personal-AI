@@ -28,25 +28,68 @@ class InputStats:
     refused: int = 0
 
 
+def normalize_hotkey(hotkey: str) -> str:
+    """Convert 'ctrl+alt+q' style to pynput '<ctrl>+<alt>+q' style.
+
+    Modifiers/named keys go in angle brackets; single characters stay
+    bare (pynput's HotKey.parse rejects '<q>').
+    """
+    parts = [p.strip().lower() for p in hotkey.split("+") if p.strip()]
+    out = []
+    for p in parts:
+        if len(p) == 1:
+            out.append(p)
+        elif p.startswith("<"):
+            out.append(p)
+        else:
+            out.append(f"<{p}>")
+    return "+".join(out)
+
+
+# key-name table for press_key — built once from pynput's Key enum
+_KEY_ALIASES = {}
+
+
+def _build_key_table():
+    if not HAS_PYNPUT or _KEY_ALIASES:
+        return
+    for name in keyboard.Key.__members__:
+        _KEY_ALIASES[name.lower()] = keyboard.Key[name]
+    _KEY_ALIASES.update({
+        "esc": keyboard.Key.esc,
+        "win": keyboard.Key.cmd,
+        "super": keyboard.Key.cmd,
+        "return": keyboard.Key.enter,
+        "del": keyboard.Key.delete,
+        "ins": keyboard.Key.insert,
+        "pgup": keyboard.Key.page_up,
+        "pgdn": keyboard.Key.page_down,
+        "pageup": keyboard.Key.page_up,
+        "pagedown": keyboard.Key.page_down,
+        "prtsc": keyboard.Key.print_screen,
+        "break": keyboard.Key.pause,
+    })
+
+
 class KillSwitch:
     """Global hotkey kill-switch + pause gate."""
 
-    def __init__(self, hotkey: str = "<ctrl>+<alt>+q"):
+    def __init__(self, hotkey: str = "ctrl+alt+q"):
         self._engaged = False
         self._lock = threading.Lock()
-        self._callbacks: list[Callable[[], None]] = []
+        self._callbacks: list[Callable[[bool], None]] = []
         self._listener = None
         if HAS_PYNPUT:
             try:
-                hk = keyboard.HotKey(
-                    keyboard.HotKey.parse(hotkey), self._trigger
-                )
+                norm = normalize_hotkey(hotkey)
+                hk = keyboard.HotKey(keyboard.HotKey.parse(norm), self._trigger)
                 self._listener = keyboard.Listener(
                     on_press=self._proxy(hk, True),
                     on_release=self._proxy(hk, False),
                 )
                 self._listener.daemon = True
                 self._listener.start()
+                log.info("kill-switch listening on %s", norm)
             except Exception as exc:  # noqa: BLE001
                 log.warning("kill-switch listener failed to start: %s", exc)
 
@@ -73,6 +116,10 @@ class KillSwitch:
             except Exception:  # noqa: BLE001
                 pass
 
+    def toggle(self):
+        """Public programmatic toggle (dashboard kill button uses this)."""
+        self._trigger()
+
     @property
     def engaged(self) -> bool:
         return self._engaged
@@ -95,6 +142,7 @@ class InputController:
         self.move_duration_ms = move_duration_ms
         self.type_interval_sec = type_interval_sec
         self.stats = InputStats()
+        _build_key_table()
 
     def _gate(self) -> bool:
         if self.ks.engaged:
@@ -109,6 +157,7 @@ class InputController:
         if not self._gate() or not HAS_PYNPUT:
             return False
         m = mouse.Controller()
+        x, y = int(x), int(y)
         if duration and self.move_duration_ms > 0:
             cur = m.position
             steps = max(2, self.move_duration_ms // 10)
@@ -124,15 +173,17 @@ class InputController:
         self.stats.actions += 1
         return True
 
-    def click(self, x: Optional[int] = None, y: Optional[int] = None,
-              button: str = "left", clicks: int = 1):
+    def click(self, x=None, y=None, button: str = "left", clicks: int = 1):
         if not self._gate() or not HAS_PYNPUT:
             return False
         m = mouse.Controller()
         if x is not None and y is not None:
             self.move(x, y, duration=False)
-        btn = mouse.Button.left if button == "left" else (
-            mouse.Button.right if button == "right" else mouse.Button.middle)
+        btn = {"left": mouse.Button.left, "right": mouse.Button.right,
+               "middle": mouse.Button.middle}.get(button)
+        if btn is None:
+            log.warning("unknown button %r", button)
+            return False
         m.click(btn, clicks)
         self.stats.actions += 1
         return True
@@ -144,7 +195,7 @@ class InputController:
         if not self._gate() or not HAS_PYNPUT:
             return False
         m = mouse.Controller()
-        m.position = (x1, y1)
+        m.position = (int(x1), int(y1))
         time.sleep(0.05)
         with m.pressed(mouse.Button.left):
             steps = max(5, duration_ms // 20)
@@ -163,8 +214,8 @@ class InputController:
             return False
         m = mouse.Controller()
         if x is not None and y is not None:
-            m.position = (x, y)
-        m.scroll(0, amount)
+            m.position = (int(x), int(y))
+        m.scroll(0, int(amount))
         self.stats.actions += 1
         return True
 
@@ -174,41 +225,40 @@ class InputController:
         if not self._gate() or not HAS_PYNPUT:
             return False
         k = keyboard.Controller()
-        k.type(text)
+        k.type(str(text))
         self.stats.actions += 1
         return True
 
     def press_key(self, key: str):
-        """key like 'enter', 'ctrl+s', 'win'."""
+        """Press a key combo like 'enter', 'ctrl+s', 'win+r', 'f5', 'pgup'."""
         if not self._gate() or not HAS_PYNPUT:
             return False
+        _build_key_table()
         k = keyboard.Controller()
-        parts = [p.strip() for p in key.split("+")]
-        special = {"enter": keyboard.Key.enter, "tab": keyboard.Key.tab,
-                   "esc": keyboard.Key.esc, "escape": keyboard.Key.esc,
-                   "space": keyboard.Key.space, "backspace": keyboard.Key.backspace,
-                   "delete": keyboard.Key.delete, "up": keyboard.Key.up,
-                   "down": keyboard.Key.down, "left": keyboard.Key.left,
-                   "right": keyboard.Key.right, "home": keyboard.Key.home,
-                   "end": keyboard.Key.end, "win": keyboard.Key.cmd,
-                   "cmd": keyboard.Key.cmd, "alt": keyboard.Key.alt,
-                   "ctrl": keyboard.Key.ctrl, "shift": keyboard.Key.shift,
-                   "f5": keyboard.Key.f5}
         keys = []
-        for p in parts:
+        for part in key.split("+"):
+            p = part.strip()
             lk = p.lower()
-            if lk in special:
-                keys.append(special[lk])
+            if not p:
+                continue
+            if lk in _KEY_ALIASES:
+                keys.append(_KEY_ALIASES[lk])
             elif len(p) == 1:
                 keys.append(p)
             else:
-                log.warning("unknown key part %r", p)
+                log.warning("unknown key part %r in %r", p, key)
                 return False
-        for kk in keys[:-1]:
-            k.press(kk)
-        k.press(keys[-1]); k.release(keys[-1])
-        for kk in reversed(keys[:-1]):
-            k.release(kk)
+        if not keys:
+            return False
+        try:
+            for kk in keys[:-1]:
+                k.press(kk)
+            k.press(keys[-1]); k.release(keys[-1])
+            for kk in reversed(keys[:-1]):
+                k.release(kk)
+        except Exception as exc:  # noqa: BLE001
+            log.error("press_key(%r) failed: %s", key, exc)
+            return False
         self.stats.actions += 1
         return True
 
@@ -218,10 +268,10 @@ _ks: Optional[KillSwitch] = None
 _input: Optional[InputController] = None
 
 
-def get_kill_switch(hotkey: str = "<ctrl>+<alt>+q") -> KillSwitch:
+def get_kill_switch(hotkey: str = "ctrl+alt+q") -> KillSwitch:
     global _ks
     if _ks is None:
-        _ks = KillSwitch(hotkey)
+        _ks = KillSwitch(normalize_hotkey(hotkey))
     return _ks
 
 

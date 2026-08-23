@@ -8,7 +8,6 @@ the voice conversation as context.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from pathlib import Path
 
@@ -32,7 +31,12 @@ class HybridProvider:
         self.vc.start()
 
     def stop(self):
-        self.vc.stop()
+        """Stop BOTH the voice model and release resources (no leaks)."""
+        if hasattr(self.vc, "stop"):
+            self.vc.stop()
+
+    def is_running(self) -> bool:
+        return self.vc.is_running()
 
     # -- vision ------------------------------------------------------------------
 
@@ -62,22 +66,20 @@ class HybridProvider:
 
     def turn(self, wav_path: Path, executor: pai_tools.ToolExecutor,
              max_tool_rounds: int = 5) -> dict:
-        # screenshot for context (also drives the vision loop)
-        entry = executor.execute("screenshot", {})
-        png = executor.cap._cache[1] if executor.cap._cache else None
+        # capture a fresh frame via the public API, then try to describe it
+        executor.execute("screenshot", {})
+        png = executor.cap.last_frame()
         screen_desc = ""
         if png:
             try:
                 screen_desc = self.describe_screen(png)
                 log.info("screen: %s", screen_desc[:200])
             except Exception as exc:  # noqa: BLE001
-                log.warning("VLM describe failed: %s", exc)
+                log.warning("VLM describe failed (%s) — continuing voice-only",
+                            exc)
 
-        result = self.vc.turn(
-            wav_path, executor,
-            image_path=None,  # mmproj handles vision if we pass image later
-            max_tool_rounds=max_tool_rounds,
-        )
+        result = self.vc.turn(wav_path, executor, image_path=None,
+                              max_tool_rounds=max_tool_rounds)
         if screen_desc and not result.get("audio"):
             result["text"] = (result.get("text", "") +
                               "\n[screen] " + screen_desc)

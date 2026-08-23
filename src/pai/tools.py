@@ -10,13 +10,19 @@ Tools exposed to the model (any provider):
   open_app        — {name_or_path}
   run_command     — {command} (shell; gated by autonomy level)
 
-Tool schema is exported as JSON so providers can register it.
+Autonomy levels:
+  confirm   — every action blocked except screenshot (assistant proposes,
+              human acts or explicitly approves)
+  auto_safe — input actions allowed, run_command blocked
+  full      — everything allowed
+
+Every execution is logged and broadcast via the on_event callback so the
+dashboard can show live tool activity.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import threading
@@ -53,33 +59,54 @@ def tool_schema() -> list[dict]:
 class ToolExecutor:
     """Executes tool calls, records history, enforces autonomy + kill-switch."""
 
-    SAFE_TOOLS = {"screenshot", "click", "drag", "scroll", "type_text",
-                  "press_key", "open_app"}
+    # what each autonomy level allows
+    LEVELS = {
+        "confirm": {"screenshot"},
+        "auto_safe": {"screenshot", "click", "drag", "scroll",
+                      "type_text", "press_key", "open_app"},
+        "full": {"screenshot", "click", "drag", "scroll", "type_text",
+                 "press_key", "open_app", "run_command"},
+    }
 
     def __init__(self, autonomy: str = "full",
-                 on_screenshot: Optional[Callable[[bytes], None]] = None):
-        self.autonomy = autonomy
+                 on_screenshot: Optional[Callable[[bytes], None]] = None,
+                 on_event: Optional[Callable[[dict], None]] = None):
+        self.autonomy = autonomy if autonomy in self.LEVELS else "full"
+        if autonomy not in self.LEVELS:
+            log.warning("unknown autonomy %r, using 'full'", autonomy)
         self.history: list[dict] = []
         self._lock = threading.Lock()
         self.on_screenshot = on_screenshot
+        self.on_event = on_event
         self.cap = screen_capture.get_capture()
         self.inp = input_control.get_input()
+
+    @property
+    def allowed(self) -> set[str]:
+        return self.LEVELS[self.autonomy]
 
     def execute(self, name: str, params: dict) -> dict:
         t0 = time.perf_counter()
         entry = {"tool": name, "params": params, "ok": False, "result": None}
-        try:
-            if name == "run_command" and self.autonomy != "full":
-                entry["result"] = f"blocked: autonomy={self.autonomy}"
-            else:
+        if name not in self.allowed:
+            entry["result"] = f"blocked: autonomy={self.autonomy} does not allow '{name}'"
+            entry["blocked"] = True
+            log.warning("tool %s %s", name, entry["result"])
+        else:
+            try:
                 entry["result"] = self._dispatch(name, params)
                 entry["ok"] = not isinstance(entry["result"], Exception)
-        except Exception as exc:  # noqa: BLE001
-            entry["result"] = f"error: {exc}"
+            except Exception as exc:  # noqa: BLE001
+                entry["result"] = f"error: {exc}"
         entry["ms"] = round((time.perf_counter() - t0) * 1000, 1)
         with self._lock:
             self.history.append(entry)
         log.info("tool %s -> %s (%.0fms)", name, entry["result"], entry["ms"])
+        if self.on_event:
+            try:
+                self.on_event(entry)
+            except Exception:  # noqa: BLE001
+                pass
         return entry
 
     def _dispatch(self, name: str, p: dict):
@@ -94,7 +121,7 @@ class ToolExecutor:
             return {"ok": True, "bytes": len(png),
                     "hash": self.cap.screenshot_hash()}
         if name == "click":
-            ok = self.inp.click(p["x"], p["y"],
+            ok = self.inp.click(p.get("x"), p.get("y"),
                                 p.get("button", "left"),
                                 2 if p.get("double") else 1)
             return {"ok": ok}
@@ -114,19 +141,21 @@ class ToolExecutor:
         raise ValueError(f"unknown tool: {name}")
 
     def _open_app(self, target: str):
-        # resolve common apps
         known = {"notepad": "notepad.exe", "calc": "calc.exe",
                  "explorer": "explorer.exe", "terminal": "wt.exe",
                  "cmd": "cmd.exe", "paint": "mspaint.exe"}
-        exe = known.get(target.lower(), target)
+        exe = known.get(str(target).lower(), target)
+        # never let shell metacharacters through Popen(shell=True)
         if Path(exe).exists() or shutil.which(exe):
             subprocess.Popen([exe], shell=False,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"ok": True, "launched": exe}
-        # try shell resolution (start command)
-        subprocess.Popen(f'start "" "{exe}"', shell=True,
+        safe = "".join(ch for ch in exe
+                       if ch.isalnum() or ch in " ._:\\/-")
+        log.info("open_app: shell-start fallback for %r", safe)
+        subprocess.Popen(["cmd", "/c", "start", "", safe], shell=False,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {"ok": True, "launched": exe, "via": "shell-start"}
+        return {"ok": True, "launched": safe, "via": "shell-start"}
 
     def _run_command(self, command: str):
         r = subprocess.run(command, shell=True, capture_output=True,
@@ -139,15 +168,13 @@ def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
     """Extract tool calls from model output. Supports:
 
     1. ```tool ... ``` / ```json fenced blocks containing {"tool": ..., "params": {...}}
-    2. bare JSON {"tool": "...", "params": {...}} lines
+    2. bare JSON {"tool": "...", "params": {...}} anywhere in the text
     3. <tool_call>name</tool_call><params>{...}</params> style
     """
     import re
     calls = []
-    # fenced blocks
     for m in re.finditer(r"```(?:tool|json)?\s*\n(.*?)```", text, re.S):
         _try_parse(m.group(1), calls)
-    # bare json objects scanned anywhere in the text
     if not calls:
         dec = json.JSONDecoder()
         idx = 0
@@ -162,7 +189,6 @@ def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
                     calls.append((obj["tool"], obj.get("params", {})))
             except json.JSONDecodeError:
                 idx = start + 1
-    # xml-ish
     if not calls:
         for m in re.finditer(
                 r"<tool_call>\s*(\w+)\s*</tool_call>\s*<params>(.*?)</params>",

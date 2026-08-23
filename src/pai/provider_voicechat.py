@@ -1,13 +1,13 @@
 """Provider: Nemotron VoiceChat 11B via llama-voicechat.exe --serve.
 
 Single speech-to-speech model (STT+LLM+TTS in one). Communication is via
-the process stdin/stdout JSON event protocol (same as push_to_talk.py):
+the process stdin/stdout JSON protocol (same as push_to_talk.py):
 
-  -> {"cmd": "turn", "input": "<wav-path>", ...}
-  <- {"type": "audio", "audio_path": "..."} / {"type": "text", ...}
+  -> {"cmd": "turn", "audio": "<in.wav>", "out": "<out.wav>"}
+  <- reply WAV written to <out.wav> when generation finishes
 
-With the function-head GGUF the model can also emit tool calls; this
-provider feeds tool results back and loops until a final audio answer.
+The function-head GGUF is attempted first and auto-falls-back to the
+standard STT-LLM model if the installed exe doesn't support it.
 """
 from __future__ import annotations
 
@@ -36,25 +36,22 @@ class VoiceChatProvider:
         self._events: list[dict] = []
         self._ev_lock = threading.Lock()
         self._cv = threading.Condition(self._ev_lock)
+        self._turn_seq = 0
 
     # -- lifecycle ------------------------------------------------------------
 
     def start(self):
         if self.proc and self.proc.poll() is None:
-            return
-        try:
-            self._launch(use_funchead=self.use_funchead)
-            self._wait_ready(timeout=180)
-        except RuntimeError:
-            if self.use_funchead:
+            return True
+        if self.use_funchead:
+            try:
+                return self._launch(use_funchead=True)
+            except RuntimeError:
                 log.warning("funchead model failed to load "
                             "(exe may not support voicechat_function_head); "
                             "falling back to standard STT-LLM model")
                 self.use_funchead = False
-                self._launch(use_funchead=False)
-                self._wait_ready(timeout=180)
-            else:
-                raise
+        return self._launch(use_funchead=False)
 
     def _launch(self, use_funchead: bool):
         main = config.GGUF_FUNCHEAD if use_funchead else config.GGUF_MAIN
@@ -67,6 +64,8 @@ class VoiceChatProvider:
             "--serve",
         ]
         log.info("starting voicechat: %s", " ".join(cmd))
+        with self._cv:
+            self._events.clear()   # stale events from a previous launch
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -74,7 +73,14 @@ class VoiceChatProvider:
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
-        self._wait_ready(timeout=180)
+        ok = self._wait_ready(timeout=180)
+        if not ok:
+            raise RuntimeError(
+                f"voicechat failed to become ready "
+                f"(exit code {self.proc.poll() if self.proc else 'n/a'})")
+        log.info("voicechat ready (%s)",
+                 "funchead" if use_funchead else "standard STT-LLM")
+        return True
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -102,14 +108,17 @@ class VoiceChatProvider:
             pass
         self.proc = None
 
+    def is_running(self) -> bool:
+        return bool(self.proc and self.proc.poll() is None)
+
     def _read_loop(self):
         assert self.proc and self.proc.stdout
         for line in self.proc.stdout:
             line = line.strip()
             if not line:
                 continue
-            if line.startswith("SERVER:"):
-                log.debug("%s", line)
+            if line.startswith("SERVER:") or line.startswith("cmn"):
+                log.debug("%s", line[:200])
                 continue
             try:
                 ev = json.loads(line)
@@ -120,7 +129,7 @@ class VoiceChatProvider:
                 self._events.append(ev)
                 self._cv.notify_all()
 
-    def _wait_ready(self, timeout: float = 120):
+    def _wait_ready(self, timeout: float = 180):
         t0 = time.time()
         while time.time() - t0 < timeout:
             with self._cv:
@@ -129,25 +138,9 @@ class VoiceChatProvider:
                             or ev.get("kind") == "ready"):
                         return True
             if self.proc and self.proc.poll() is not None:
-                raise RuntimeError("voicechat server exited during startup")
+                return False
             time.sleep(0.5)
-        log.warning("voicechat readiness not signalled; continuing anyway")
         return False
-
-    def _wait_event(self, kinds: tuple[str, ...], timeout: float = 120) -> dict | None:
-        deadline = time.time() + timeout
-        seen = 0
-        while time.time() < deadline:
-            with self._cv:
-                if len(self._events) > seen:
-                    ev = self._events[seen]
-                    seen += 1
-                    kind = ev.get("type") or ev.get("kind")
-                    if kind in kinds:
-                        return ev
-                    continue
-                self._cv.wait(min(1.0, deadline - time.time()))
-        return None
 
     # -- conversation ----------------------------------------------------------
 
@@ -160,20 +153,28 @@ class VoiceChatProvider:
           -> {"cmd":"turn", "audio": <in.wav>, "out": <out.wav>}
           <- reply WAV written to <out.wav> when generation finishes
         """
-        out_wav = config.VOICECHAT_DIR / "pai_answer.wav"
+        if not self.is_running():
+            self.start()
+        out_wav = config.VOICECHAT_DIR / f"pai_answer_{self._turn_seq % 4}.wav"
+        self._turn_seq += 1
         if out_wav.exists():
-            out_wav.unlink()
+            try:
+                out_wav.unlink()
+            except OSError:
+                pass
         event = {"cmd": "turn", "audio": str(wav_path), "out": str(out_wav)}
         if image_path:
             event["image"] = str(image_path)
         self._send(event)
+        log.info("turn: sent (%d bytes audio), waiting for reply...",
+                 wav_path.stat().st_size)
 
         # wait for the reply wav to appear and stop growing
         deadline = time.time() + 180
         last_size = -1
         stable = 0
         while time.time() < deadline:
-            if self.proc and self.proc.poll() is not None:
+            if not self.is_running():
                 return {"text": "(voicechat exited)", "tool_calls": [],
                         "audio": None}
             if out_wav.exists():
@@ -187,8 +188,10 @@ class VoiceChatProvider:
                     stable = 0
                 last_size = size
             time.sleep(0.5)
-        return {"text": "(timeout waiting for voicechat reply)", "tool_calls": [],
-                "audio": None}
+        log.error("turn: timed out after %.0fs waiting for %s",
+                  time.time() - (deadline - 180), out_wav.name)
+        return {"text": "(timeout waiting for voicechat reply)",
+                "tool_calls": [], "audio": None}
 
     def _send(self, event: dict):
         assert self.proc and self.proc.stdin

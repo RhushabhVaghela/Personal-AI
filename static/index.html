@@ -107,6 +107,7 @@ function connect(){
       case "screenshot": $("shot").innerHTML =
         `<img src="data:image/png;base64,${m.image}">`; break;
       case "kill_state": setKill(m.engaged); break;
+      case "tool": addToolLine(m.text); break;
     }
   };
   ws.onclose = () => { $("status").textContent = "disconnected";
@@ -115,6 +116,16 @@ function connect(){
 function setKill(on){
   $("kill").textContent = "kill-switch: " + (on ? "ENGAGED" : "off");
   $("kill").classList.toggle("on", on);
+}
+let toolCount = 0;
+function addToolLine(text){
+  toolCount++;
+  const d = document.createElement("div");
+  d.className = "tool-line"; d.textContent = text;
+  const panel = $("tools");
+  if(toolCount === 1) panel.innerHTML = "";
+  panel.appendChild(d);
+  panel.scrollTop = 1e9;
 }
 function playAudio(b64, fmt){
   const mime = fmt === "mp3" ? "audio/mpeg" : "audio/wav";
