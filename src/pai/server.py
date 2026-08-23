@@ -21,6 +21,8 @@ from pathlib import Path
 
 from . import config, input_control, providers, tools
 from .vad import get_engine, listen_continuous
+from .wakeword import WakeWordGate
+from .screenshare import ScreenShareStreamer
 
 log = logging.getLogger("pai.server")
 
@@ -36,6 +38,8 @@ _provider_lock = asyncio.Lock()
 _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 _HANDSFREE = {"thread": None, "stop": None, "engine": None,
               "session": None}
+_WAKE_GATE = {"gate": None}
+_SHARE = {"streamer": None}
 
 
 async def _get_shared_provider(name: str):
@@ -142,6 +146,24 @@ class AssistantSession:
             await self.send("kill_state", engaged=ks.engaged)
         elif kind == "hands_free":
             await self._toggle_hands_free(bool(msg.get("on")))
+        elif kind == "wake_mode":
+            # Gemini 'proactive audio' parity: hands-free stays armed until
+            # the wake phrase is heard (or OWW audio detection fires)
+            on = bool(msg.get("on"))
+            if on:
+                if _WAKE_GATE["gate"] is None:
+                    _WAKE_GATE["gate"] = WakeWordGate(
+                        phrases=msg.get("phrases") or None)
+                _WAKE_GATE["gate"].activate()   # first turn free, then re-arms
+                await self._toggle_hands_free(True)
+                await self.send("wake_mode", on=True,
+                                oww=WakeWordGate.available())
+            else:
+                if _WAKE_GATE["gate"]:
+                    _WAKE_GATE["gate"].deactivate()
+                await self.send("wake_mode", on=False)
+        elif kind == "share_screen":
+            await self._toggle_share_screen(bool(msg.get("on")))
         elif kind == "stop_speak":
             # user interrupted the assistant: stop audio + reopen the mic
             _HANDSFREE["engine"].set_speaking(False) \
@@ -163,6 +185,24 @@ class AssistantSession:
 
     # -- hands-free (VAD) ---------------------------------------------------------
 
+    async def _toggle_share_screen(self, on: bool) -> None:
+        if on and not _SHARE["streamer"]:
+            def push(png: bytes):
+                if _MAIN_LOOP and _MAIN_LOOP.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.send("screen_stream",
+                                  image=base64.b64encode(png).decode()),
+                        _MAIN_LOOP)
+            s = ScreenShareStreamer(on_frame=push)
+            if s.start():
+                _SHARE["streamer"] = s
+                await self.send("share_screen", on=True)
+                await self.send("status", text="🖥 sharing your screen")
+        elif not on and _SHARE["streamer"]:
+            _SHARE["streamer"].stop()
+            _SHARE["streamer"] = None
+            await self.send("share_screen", on=False)
+
     async def _toggle_hands_free(self, on: bool) -> None:
         hf = _HANDSFREE
         if on and hf["thread"] is None:
@@ -177,9 +217,29 @@ class AssistantSession:
             async def handle_utterance(wav_path):
                 log.info("vad: utterance %s (%d bytes)", wav_path.name,
                          wav_path.stat().st_size)
+                # wake-word gate (proactive audio): if armed and the
+                # transcript lacks a wake phrase, drop the turn.
+                gate = _WAKE_GATE["gate"]
+                if gate and not gate.is_active:
+                    try:
+                        from .provider_modular import ModularProvider
+                        probe = ModularProvider().transcribe(wav_path)
+                        ok, cleaned = gate.check_transcript(probe)
+                        if not ok:
+                            log.info("vad: dropped (no wake phrase): %r",
+                                     probe[:60])
+                            return
+                        # re-synthesize cleaned text for providers that need audio
+                        if (_active_name or "") in ("voicechat", "hybrid"):
+                            wav_path = self._tts_input(cleaned) \
+                                if cleaned else wav_path
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("wake gate check failed (%s); accepting", exc)
+
                 engine.set_speaking(True)   # close mic gate during reply
                 try:
                     await self._turn(wav_path)
+                    gate.activate() if gate else None   # follow-ups stay open
                 finally:
                     engine.set_speaking(False)
 

@@ -39,6 +39,8 @@ def tool_schema() -> list[dict]:
     return [
         {"name": "screenshot", "description": "Capture the current screen (returns image for vision).",
          "params": {"monitor": "int, default 0"}},
+        {"name": "look_at_screen", "description": "Inspect the latest shared screen frame (use when screen sharing is active and the user asks about what they see).",
+         "params": {}},
         {"name": "click", "description": "Click the mouse.",
          "params": {"x": "int", "y": "int", "button": "left|right|middle", "double": "bool"}},
         {"name": "drag", "description": "Drag from (x1,y1) to (x2,y2).",
@@ -61,11 +63,11 @@ class ToolExecutor:
 
     # what each autonomy level allows
     LEVELS = {
-        "confirm": {"screenshot"},
-        "auto_safe": {"screenshot", "click", "drag", "scroll",
-                      "type_text", "press_key", "open_app"},
-        "full": {"screenshot", "click", "drag", "scroll", "type_text",
-                 "press_key", "open_app", "run_command"},
+        "confirm": {"screenshot", "look_at_screen"},
+        "auto_safe": {"screenshot", "look_at_screen", "click", "drag",
+                      "scroll", "type_text", "press_key", "open_app"},
+        "full": {"screenshot", "look_at_screen", "click", "drag", "scroll",
+                 "type_text", "press_key", "open_app", "run_command"},
     }
 
     def __init__(self, autonomy: str = "full",
@@ -110,7 +112,21 @@ class ToolExecutor:
         return entry
 
     def _dispatch(self, name: str, p: dict):
-        if name == "screenshot":
+        if name in ("screenshot", "look_at_screen"):
+            if name == "look_at_screen":
+                from . import server as _srv  # late import (circular-safe)
+                streamer = _srv._SHARE.get("streamer")
+                if streamer and streamer.latest_png:
+                    png = streamer.latest_png
+                    if self.on_screenshot:
+                        try:
+                            self.on_screenshot(png)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return {"ok": True, "source": "shared_stream",
+                            "age_s": round(time.time() - getattr(
+                                streamer, "_last_ts", time.time()), 1)}
+                # fall through to a fresh capture when nothing is shared
             png = self.cap.capture_png(int(p.get("monitor", 0)),
                                        max_width=p.get("max_width"))
             if self.on_screenshot:
