@@ -108,6 +108,11 @@ class Config:
     # voice identity (ChatGPT-style voices + speed)
     tts_voice: str = "en-US-AriaNeural"      # edge-tts voice name
     tts_speed: float = 1.0                   # 0.75 - 1.5 playback rate
+    backchannel: bool = True                 # "mm-hmm?" acks (GPT-Live parity)
+    # reasoning effort + escalation (GPT-Live delegation parity)
+    reasoning_effort: str = "instant"        # instant | deep
+    deep_llm_base_url: str = ""              # empty = same LLM
+    deep_llm_model: str = ""                 # e.g. a bigger local model or gpt-4o
     # autonomy: "confirm" | "auto_safe" | "full"
     autonomy: str = "full"
     kill_switch_keys: str = "ctrl+alt+q"

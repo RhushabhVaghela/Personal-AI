@@ -120,18 +120,37 @@ class ModularProvider:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _chat(self, messages: list[dict]) -> str:
-        key = self._key_for(config.PROFILES[self.profile]["llm_key_env"])
+    def _chat(self, messages: list[dict], deep: bool = False) -> str:
+        """Chat via the active LLM. deep=True escalates to the bigger model
+        (GPT-Live delegation parity) when configured."""
+        base_url = self.cfg.llm_base_url
+        model = self.cfg.llm_model
+        key_env = config.PROFILES[self.profile]["llm_key_env"]
+        if deep:
+            if self.cfg.deep_llm_base_url:
+                base_url = self.cfg.deep_llm_base_url
+            if self.cfg.deep_llm_model:
+                model = self.cfg.deep_llm_model
+                if "openai.com" in base_url and not self.cfg.deep_llm_base_url:
+                    pass  # same endpoint, bigger model
+            log.info("llm[%s]: DEEP reasoning via %s", self.profile, model)
+        else:
+            log.info("llm[%s]: instant via %s", self.profile, model)
+        key = self._key_for(key_env)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         r = requests.post(
-            f"{self.cfg.llm_base_url}/chat/completions",
+            f"{base_url}/chat/completions",
             headers=headers,
-            json={"model": self.cfg.llm_model, "messages": messages,
+            json={"model": model, "messages": messages,
                   "temperature": 0.4, "max_tokens": 512},
-            timeout=180,
+            timeout=300 if deep else 180,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
+
+    def set_effort(self, effort: str) -> None:
+        self.cfg.reasoning_effort = effort if effort in ("instant", "deep") \
+            else "instant"
 
     def switch_profile(self, profile: str) -> dict:
         info = self.cfg.apply_profile(profile)

@@ -172,6 +172,17 @@ class AssistantSession:
                 self.cfg.tts_speed = max(0.5, min(2.0, float(speed)))
             await self.send("voice_ok", voice=self.cfg.tts_voice,
                             speed=self.cfg.tts_speed)
+        elif kind == "set_effort":
+            # GPT-Live reasoning effort: instant | deep (escalates model)
+            effort = msg.get("effort", "instant")
+            self.cfg.reasoning_effort = effort
+            if hasattr(_active_provider, "set_effort"):
+                _active_provider.set_effort(effort)
+            await self.send("status",
+                            text=f"🧠 {effort} mode" +
+                                 (" — deep model" if effort == "deep" and
+                                  (self.cfg.deep_llm_model or
+                                   self.cfg.deep_llm_base_url) else ""))
         elif kind == "session":
             await self._handle_session(msg)
         elif kind == "share_screen":
@@ -367,6 +378,8 @@ class AssistantSession:
             transcript = await loop.run_in_executor(
                 None, provider.transcribe, wav)
             await self.send("transcript", text=transcript)
+            # GPT-Live-style backchannel while the model thinks
+            asyncio.ensure_future(self._play_backchannel())
             await self.send("status", text="thinking...")
             result = await loop.run_in_executor(
                 None, provider.think, transcript, self.executor)
@@ -401,6 +414,29 @@ class AssistantSession:
             await self.send("reply", text=text or "(empty reply)")
             if audio:
                 await self._send_audio(Path(audio))
+
+    _ack_cache: dict = {}
+
+    async def _play_backchannel(self) -> None:
+        """Play a short acknowledgement clip (cached, best-effort)."""
+        try:
+            cfg = self.cfg
+            if not getattr(cfg, "backchannel", True):
+                return
+            key = f"{cfg.tts_voice}:{cfg.tts_speed}"
+            mp3 = Path(__import__("tempfile").gettempdir()) / "pai_ack.mp3"
+            if key not in self._ack_cache:
+                if not mp3.exists():
+                    import edge_tts
+                    await edge_tts.Communicate(
+                        "Mm-hmm?", voice=cfg.tts_voice).save(str(mp3))
+                self._ack_cache[key] = mp3.read_bytes()
+            await self.send("backchannel",
+                            data=base64.b64encode(
+                                self._ack_cache[key]).decode(),
+                            format="mp3")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("backchannel skipped: %s", exc)
 
     def _transcribe(self, wav: Path) -> str:
         """Transcribe a reply wav via the local Whisper server (best-effort)."""

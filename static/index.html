@@ -78,6 +78,10 @@
   <input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1"
          style="width:80px" title="speaking speed">
   <span class="badge" id="speedval">1.0×</span>
+  <select id="effort" title="instant = fast local · deep = escalate to bigger model">
+    <option value="instant">⚡ Instant</option>
+    <option value="deep">🧠 Deep</option>
+  </select>
   <span class="badge" id="status">connecting</span>
   <span class="badge" id="latency" title="turn latency"></span>
   <span class="badge hf-on" id="hf" style="display:none">👂 hands-free</span>
@@ -182,11 +186,13 @@ function connect(){
         tUser = performance.now(); break;
       case "reply": {
         logMsg("bot", m.text);
+        if(m.text && m.text !== "(voice reply)") showCaption(m.text);
         if(tUser) $("latency").textContent =
           ((performance.now()-tUser)/1000).toFixed(1)+"s";
         break;
       }
       case "audio": enqueueAudio(m.data, m.format); break;
+      case "backchannel": enqueueAudio(m.data, m.format); break;
       case "screenshot": $("shot").innerHTML =
         `<img src="data:image/png;base64,${m.image}">`; break;
       case "kill_state": setKill(m.engaged); break;
@@ -217,6 +223,19 @@ function connect(){
   };
   ws.onclose = () => { $("status").textContent = "disconnected";
     setTimeout(connect, 2000); };
+}
+/* captions overlay — Gemini auto-cc parity */
+const capEl = document.createElement("div");
+capEl.style.cssText = "position:fixed;bottom:18px;left:50%;transform:translateX(-50%);"+
+  "max-width:70%;background:rgba(0,0,0,.75);color:#fff;padding:8px 16px;border-radius:10px;"+
+  "font-size:15px;line-height:1.4;display:none;z-index:99;text-align:center";
+document.body.appendChild(capEl);
+let capTimer = null;
+function showCaption(text){
+  capEl.textContent = text;
+  capEl.style.display = "block";
+  clearTimeout(capTimer);
+  capTimer = setTimeout(()=>capEl.style.display="none", Math.min(12000, 2500+text.length*55));
 }
 let tUser = 0;
 function setKill(on){
@@ -282,6 +301,8 @@ $("speed").oninput = () => {
   speedTimer = setTimeout(() => ws.send(JSON.stringify(
     {kind:"set_voice", speed:parseFloat($("speed").value)})), 400);
 };
+$("effort").onchange = () => ws.send(JSON.stringify(
+  {kind:"set_effort", effort:$("effort").value}));
 $("newchat").onclick = () => { $("log").innerHTML=""; toolCount=0;
   $("tools").innerHTML=""; ws.send(JSON.stringify(
   {kind:"session", action:"new"})); };
