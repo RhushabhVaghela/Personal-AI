@@ -162,6 +162,18 @@ class AssistantSession:
                 if _WAKE_GATE["gate"]:
                     _WAKE_GATE["gate"].deactivate()
                 await self.send("wake_mode", on=False)
+        elif kind == "set_voice":
+            # ChatGPT-style voice + speed selection
+            voice = msg.get("voice")
+            speed = msg.get("speed")
+            if voice:
+                self.cfg.tts_voice = str(voice)
+            if speed:
+                self.cfg.tts_speed = max(0.5, min(2.0, float(speed)))
+            await self.send("voice_ok", voice=self.cfg.tts_voice,
+                            speed=self.cfg.tts_speed)
+        elif kind == "session":
+            await self._handle_session(msg)
         elif kind == "share_screen":
             await self._toggle_share_screen(bool(msg.get("on")))
         elif kind == "stop_speak":
@@ -182,6 +194,42 @@ class AssistantSession:
                                 provider=_active_name or "modular")
             except Exception as exc:  # noqa: BLE001
                 await self.send("error", text=f"profile switch failed: {exc}")
+
+    # -- session / transcript management (ChatGPT-style history) -----------------
+
+    def _memory(self):
+        prov = _active_provider
+        mem = getattr(prov, "memory", None)
+        if mem is None:
+            from .memory import ConversationStore
+            cfg = self.cfg
+            mem = ConversationStore(session=cfg.session_name,
+                                    max_turns=cfg.memory_turns,
+                                    summarize_after=cfg.memory_summarize_after)
+        return mem
+
+    async def _handle_session(self, msg: dict) -> None:
+        action = msg.get("action", "stats")
+        mem = self._memory()
+        if action == "new":
+            mem.reset()
+            await self.send("status", text="🆕 new conversation started")
+            await self.send("session", action="new", stats=mem.stats())
+        elif action == "export":
+            path = mem.path
+            if path.exists():
+                import shutil
+                dest = LOG_DIR / f"session_export_{int(time.time())}.jsonl"
+                shutil.copy2(path, dest)
+                await self.send("status", text=f"exported → {dest.name}")
+                await self.send("session", action="exported", path=str(dest))
+            else:
+                await self.send("error", text="no session yet")
+        else:  # stats / transcript
+            turns = [{"role": t["role"], "text": t["text"], "ts": t["ts"]}
+                     for t in list(mem.turns)[-200:]]
+            await self.send("session", action="transcript", turns=turns,
+                            summary=mem.summary, stats=mem.stats())
 
     # -- hands-free (VAD) ---------------------------------------------------------
 

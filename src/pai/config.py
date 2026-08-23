@@ -105,6 +105,9 @@ class Config:
     memory_turns: int = 24                   # rolling context window
     memory_summarize_after: int = 40
     session_name: str = "default"
+    # voice identity (ChatGPT-style voices + speed)
+    tts_voice: str = "en-US-AriaNeural"      # edge-tts voice name
+    tts_speed: float = 1.0                   # 0.75 - 1.5 playback rate
     # autonomy: "confirm" | "auto_safe" | "full"
     autonomy: str = "full"
     kill_switch_keys: str = "ctrl+alt+q"

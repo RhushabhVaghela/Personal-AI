@@ -167,7 +167,11 @@ class ModularProvider:
 
         async def _run():
             import edge_tts
-            await edge_tts.Communicate(text, "en-US-AriaNeural").save(
+            rate_pct = int(round((self.cfg.tts_speed - 1.0) * 100))
+            kwargs = {"voice": self.cfg.tts_voice}
+            if rate_pct:
+                kwargs["rate"] = f"{rate_pct:+d}%"
+            await edge_tts.Communicate(text, **kwargs).save(
                 str(out_path.with_suffix(".mp3")))
         asyncio.run(_run())
         return out_path.with_suffix(".mp3")
@@ -175,11 +179,13 @@ class ModularProvider:
     def _openai_tts(self, text: str, out_path: Path) -> Path:
         key = self._key_for(config.PROFILES[self.profile].get("tts_key_env")
                             or "OPENAI_API_KEY")
+        speed = max(0.25, min(4.0, float(self.cfg.tts_speed)))
         r = requests.post(
             "https://api.openai.com/v1/audio/speech",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": "tts-1", "input": text[:4096],
-                  "voice": "alloy", "response_format": "mp3"},
+                  "voice": getattr(self.cfg, "tts_openai_voice", "alloy"),
+                  "speed": speed, "response_format": "mp3"},
             timeout=120,
         )
         r.raise_for_status()
