@@ -13,3 +13,5 @@ numpy>=1.26
 edge-tts>=6.1.0   # modular TTS fallback (free, online)
 # dxcam; psutil  # optional capture/monitoring extras
 webrtcvad-wheels>=2.0.14
+openwakeword>=0.6.0
+onnxruntime>=1.17
