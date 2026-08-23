@@ -65,6 +65,19 @@
     <option value="online-openai">☁ OpenAI</option>
     <option value="online-groq">☁ Groq</option>
   </select>
+  <select id="voice" title="assistant voice">
+    <option value="">🎙 Voice…</option>
+    <option value="en-US-AriaNeural">Aria</option>
+    <option value="en-US-JennyNeural">Jenny</option>
+    <option value="en-US-GuyNeural">Guy</option>
+    <option value="en-US-AnaNeural">Ana (cheerful)</option>
+    <option value="en-GB-SoniaNeural">Sonia (UK)</option>
+    <option value="en-IN-NeerjaNeural">Neerja (IN)</option>
+    <option value="en-IN-PrabhatNeural">Prabhat (IN)</option>
+  </select>
+  <input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1"
+         style="width:80px" title="speaking speed">
+  <span class="badge" id="speedval">1.0×</span>
   <span class="badge" id="status">connecting</span>
   <span class="badge" id="latency" title="turn latency"></span>
   <span class="badge hf-on" id="hf" style="display:none">👂 hands-free</span>
@@ -77,6 +90,8 @@
       <input id="text-in" placeholder="Type, hold 🎙 to speak, or turn on 👂 hands-free…">
       <button id="mic" class="sec">🎙 Hold</button>
       <button id="hfbtn" class="sec">👂 Hands-free</button>
+      <button id="wakebtn" class="sec" title="only respond to 'hey assistant'">📣 Wake word</button>
+      <button id="sharebtn" class="sec" title="continuous screen share (Gemini-style)">🖥 Share screen</button>
       <button id="stopbtn" class="sec" style="display:none">⏹ Stop</button>
       <button id="send">Send</button>
     </div>
@@ -86,6 +101,14 @@
     <div class="row">
       <button id="snap" class="sec" style="flex:1">📸 Screenshot</button>
       <button id="killbtn" class="sec" style="flex:1">🛑 Kill-switch</button>
+    </div>
+    <div class="row">
+      <button id="newchat" class="sec" style="flex:1">🆕 New chat</button>
+      <button id="transcriptbtn" class="sec" style="flex:1">🗒 Transcript</button>
+      <button id="exportbtn" class="sec" style="flex:1">⬇ Export</button>
+    </div>
+    <div id="transcript" style="display:none;max-height:200px;overflow-y:auto;
+         font-size:11px;padding:8px 10px;border-top:1px solid var(--border)">
     </div>
     <div id="tools"></div>
   </aside>
@@ -173,6 +196,22 @@ function connect(){
         $("hfbtn").classList.toggle("live", m.on);
         $("hfbtn").textContent = m.on ? "👂 Listening…" : "👂 Hands-free";
         break;
+      case "wake_mode":
+        $("wakebtn").classList.toggle("live", m.on);
+        $("wakebtn").textContent = m.on ? "📣 Armed" : "📣 Wake word";
+        logMsg("sys", m.on ? "📣 wake-word armed — say \"hey assistant…\""
+                           : "📣 wake word off");
+        break;
+      case "share_screen":
+        $("sharebtn").classList.toggle("live", m.on);
+        $("sharebtn").textContent = m.on ? "🖥 Sharing…" : "🖥 Share screen";
+        break;
+      case "screen_stream": $("shot").innerHTML =
+        `<img src="data:image/png;base64,${m.image}">`; break;
+      case "voice_ok": $("status").textContent =
+        `voice: ${m.voice.split("-").slice(2,3)[0]||m.voice} @ ${m.speed}×`;
+        break;
+      case "session": renderSession(m); break;
       case "vad": $("status").textContent = "listening…"; break;
     }
   };
@@ -231,6 +270,42 @@ $("mic").style.userSelect = "none";
 $("mic").style.touchAction = "none";
 $("hfbtn").onclick = () => ws.send(JSON.stringify(
   {kind:"hands_free", on:$("hf").style.display === "none"}));
+$("wakebtn").onclick = () => ws.send(JSON.stringify({kind:"wake_mode", on:true}));
+$("sharebtn").onclick = () => ws.send(JSON.stringify(
+  {kind:"share_screen", on:!$("sharebtn").classList.contains("live")}));
+$("voice").onchange = () => ws.send(JSON.stringify(
+  {kind:"set_voice", voice:$("voice").value}));
+let speedTimer = null;
+$("speed").oninput = () => {
+  $("speedval").textContent = parseFloat($("speed").value).toFixed(2)+"×";
+  clearTimeout(speedTimer);
+  speedTimer = setTimeout(() => ws.send(JSON.stringify(
+    {kind:"set_voice", speed:parseFloat($("speed").value)})), 400);
+};
+$("newchat").onclick = () => { $("log").innerHTML=""; toolCount=0;
+  $("tools").innerHTML=""; ws.send(JSON.stringify(
+  {kind:"session", action:"new"})); };
+$("transcriptbtn").onclick = () => {
+  const p = $("transcript");
+  if(p.style.display === "none"){ p.style.display=""; p.innerHTML="loading…";
+    ws.send(JSON.stringify({kind:"session", action:"transcript"})); }
+  else p.style.display="none";
+};
+$("exportbtn").onclick = () => ws.send(JSON.stringify(
+  {kind:"session", action:"export"}));
+function renderSession(m){
+  if(m.action !== "transcript") return;
+  const p = $("transcript");
+  let html = "";
+  if(m.summary) html += `<div style="color:var(--accent);margin-bottom:6px">📌 summary kept</div>`;
+  for(const t of (m.turns||[])){
+    const who = t.role === "user" ? "🧑" : "🤖";
+    html += `<div style="padding:2px 0;border-bottom:1px dashed var(--border)">
+      ${who} ${t.text.replace(/</g,"&lt;").slice(0,140)}</div>`;
+  }
+  p.innerHTML = html || "empty conversation";
+  p.scrollTop = 1e9;
+}
 $("stopbtn").onclick = stopSpeaking;
 $("send").onclick = () => {
   const t = $("text-in").value.trim(); if(!t) return;
