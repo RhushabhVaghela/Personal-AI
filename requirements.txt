@@ -12,3 +12,4 @@ numpy>=1.26
 # Optional backends
 edge-tts>=6.1.0   # modular TTS fallback (free, online)
 # dxcam; psutil  # optional capture/monitoring extras
+webrtcvad-wheels>=2.0.14

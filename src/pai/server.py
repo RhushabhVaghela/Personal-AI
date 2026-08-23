@@ -15,10 +15,12 @@ import logging
 import os
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from . import config, input_control, providers, tools
+from .vad import get_engine, listen_continuous
 
 log = logging.getLogger("pai.server")
 
@@ -32,6 +34,8 @@ _active_provider = None
 _active_name: str | None = None
 _provider_lock = asyncio.Lock()
 _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+_HANDSFREE = {"thread": None, "stop": None, "engine": None,
+              "session": None}
 
 
 async def _get_shared_provider(name: str):
@@ -136,6 +140,76 @@ class AssistantSession:
             ks = input_control.get_kill_switch()
             ks.toggle()
             await self.send("kill_state", engaged=ks.engaged)
+        elif kind == "hands_free":
+            await self._toggle_hands_free(bool(msg.get("on")))
+        elif kind == "stop_speak":
+            # user interrupted the assistant: stop audio + reopen the mic
+            _HANDSFREE["engine"].set_speaking(False) \
+                if _HANDSFREE.get("engine") else None
+            await self.send("status", text="stopped — mic open")
+        elif kind == "switch_profile":
+            profile = msg.get("profile", "local")
+            try:
+                self.cfg.apply_profile(profile)
+                if hasattr(_active_provider, "switch_profile"):
+                    _active_provider.switch_profile(profile)
+                prof = config.PROFILES[profile]
+                await self.send("status",
+                                text=f"profile: {prof['label']}")
+                await self.send("ready",
+                                provider=_active_name or "modular")
+            except Exception as exc:  # noqa: BLE001
+                await self.send("error", text=f"profile switch failed: {exc}")
+
+    # -- hands-free (VAD) ---------------------------------------------------------
+
+    async def _toggle_hands_free(self, on: bool) -> None:
+        hf = _HANDSFREE
+        if on and hf["thread"] is None:
+            cfg = self.cfg
+            engine = get_engine(
+                prefer_webrtc=cfg.vad_engine in ("auto", "webrtc"),
+                sample_rate=cfg.sample_rate,
+                silence_hangover_ms=cfg.vad_silence_ms)
+            stop = threading.Event()
+            hf.update(engine=engine, stop=stop, session=self)
+
+            async def handle_utterance(wav_path):
+                log.info("vad: utterance %s (%d bytes)", wav_path.name,
+                         wav_path.stat().st_size)
+                engine.set_speaking(True)   # close mic gate during reply
+                try:
+                    await self._turn(wav_path)
+                finally:
+                    engine.set_speaking(False)
+
+            def on_utterance(wav_path):
+                if _MAIN_LOOP and _MAIN_LOOP.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        handle_utterance(wav_path), _MAIN_LOOP)
+
+            def on_state(state):
+                if _MAIN_LOOP and _MAIN_LOOP.is_running() and state == "speaking":
+                    asyncio.run_coroutine_threadsafe(
+                        self.send("vad", state="listening"), _MAIN_LOOP)
+
+            hf["thread"] = threading.Thread(
+                target=lambda: listen_continuous(
+                    engine, on_utterance, on_state=on_state,
+                    stop_flag=stop), daemon=True)
+            hf["thread"].start()
+            log.info("hands-free ON (%s VAD)",
+                     type(engine).__name__)
+            await self.send("hands_free", on=True,
+                            engine=type(engine).__name__)
+            await self.send("status",
+                            text="👂 hands-free — just start talking")
+        elif not on and hf["thread"] is not None:
+            hf["stop"].set()
+            hf["thread"].join(timeout=3)
+            hf.update(thread=None, stop=None, engine=None, session=None)
+            await self.send("hands_free", on=False)
+            log.info("hands-free OFF")
 
     # -- audio plumbing ---------------------------------------------------------
 
@@ -286,7 +360,8 @@ class AssistantSession:
         try:
             data = p.read_bytes()
             await self.send("audio", data=base64.b64encode(data).decode(),
-                            format=p.suffix.lstrip("."))
+                            format=p.suffix.lstrip("."),
+                            seq=int(time.time() * 1000))
         except Exception as exc:  # noqa: BLE001
             log.warning("send audio failed: %s", exc)
 

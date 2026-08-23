@@ -21,6 +21,8 @@ def main() -> None:
                     help="recording window (default: Enter-to-stop)")
     ap.add_argument("--autonomy", choices=["confirm", "auto_safe", "full"],
                     default=None)
+    ap.add_argument("--hands-free", action="store_true",
+                    help="always-listening VAD mode (no Enter needed)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -46,6 +48,48 @@ def main() -> None:
             return
 
     executor = tools.ToolExecutor(autonomy=cfg.autonomy)
+
+    if args.hands_free:
+        from .vad import get_engine, listen_continuous
+        import threading
+        engine = get_engine(sample_rate=cfg.sample_rate,
+                            silence_hangover_ms=cfg.vad_silence_ms)
+        stop = threading.Event()
+
+        def on_utterance(wav_path: Path):
+            print(f"\n🎙 (you) — processing {wav_path.name}...")
+            engine.set_speaking(True)
+            try:
+                if provider.name == "modular":
+                    text = provider.transcribe(wav_path)
+                    print(f"🧑 You: {text}")
+                    result = provider.think(text, executor)
+                    print(f"🤖 Assistant: {result['text']}")
+                    if result.get("text"):
+                        out = Path(__file__).resolve().parents[2] / "logs" / "reply.wav"
+                        spoken = provider.speak(result["text"], out)
+                        audio.play_any(spoken)
+                else:
+                    result = provider.turn(wav_path, executor)
+                    print(f"🤖 Assistant: {result.get('text') or '(voice reply)'}")
+                    if result.get("audio"):
+                        audio.play_any(Path(result["audio"]))
+            except Exception as exc:  # noqa: BLE001
+                print(f"(turn failed: {exc})")
+            finally:
+                engine.set_speaking(False)
+            print("👂 listening...\n")
+
+        print("👂 HANDS-FREE MODE — just talk; Ctrl+C to quit")
+        try:
+            listen_continuous(engine, on_utterance, stop_flag=stop)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop.set()
+            if hasattr(provider, "stop"):
+                provider.stop()
+        return
 
     while True:
         try:

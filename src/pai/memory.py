@@ -44,6 +44,9 @@ class ConversationStore:
                     self.summary = rec.get("text", "")
                 elif rec.get("role") in ("user", "assistant"):
                     self.turns.append(rec)
+            # honor the rolling window on reload (file keeps full history)
+            if len(self.turns) > self.max_turns:
+                self.turns = self.turns[-self.max_turns:]
         except Exception as exc:  # noqa: BLE001
             log.warning("session load failed: %s", exc)
 

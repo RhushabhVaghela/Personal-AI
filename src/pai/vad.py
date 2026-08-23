@@ -79,6 +79,7 @@ class BaseVadEngine:
                         self.state = VadState.SPEAKING
                         self.buffer.clear()
             elif self.state == VadState.SPEAKING:
+                self.buffer.extend(frame)          # collect the utterance
                 if voiced:
                     self._silence_frames = 0
                     self._last_voice_ts = now
