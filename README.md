@@ -1,6 +1,6 @@
 # PersonalAI-Assistant
 
-> A local-first, realtime personal AI assistant that **listens, talks, sees your screen, and controls your PC** — built entirely on your own hardware, with swappable model backends.
+> A local-first, realtime personal AI assistant that **listens, talks, sees your screen, and controls your PC** — endless hands-free conversation like ChatGPT Voice, but running on *your* hardware. Online providers available as an option; **offline is the default**.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/RhushabhVaghela/Personal-AI)
@@ -14,13 +14,13 @@
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
-- [Providers](#providers)
+- [Hands-Free Mode (VAD)](#hands-free-mode-vad)
+- [Memory — Hours-Long Conversations](#memory--hours-long-conversations)
+- [Providers & Profiles](#providers--profiles)
 - [Tools & Computer Control](#tools--computer-control)
 - [Safety](#safety)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [Terminal Interface](#terminal-interface)
-  - [Web Dashboard](#web-dashboard)
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
@@ -33,15 +33,15 @@
 
 ## Overview
 
-PersonalAI-Assistant is a from-scratch, local-first assistant that combines three capabilities normally spread across separate products:
+PersonalAI-Assistant combines three capabilities normally spread across separate products:
 
-1. **Realtime voice conversation** — speak to it, it speaks back
-2. **Screen vision** — it can capture and understand what's on your display
-3. **Computer control** — it can click, type, scroll, drag, and launch apps on your behalf
+1. **Realtime voice conversation** — always-on listening, it speaks when you speak, for hours
+2. **Screen vision** — it captures and understands your display
+3. **Computer control** — it clicks, types, scrolls, drags, and launches apps on your behalf
 
-Everything runs on your machine. No cloud API keys required (optional Edge TTS is the only online component). The system is **modular by design**: three interchangeable "brain" providers let you trade latency vs. flexibility, and you can switch between them at runtime without restarting.
+**Offline-first:** every core capability runs on your machine with zero cloud calls. If your hardware isn't up to it, flip a dropdown to route ASR/LLM/TTS through OpenAI or Groq instead — same UI, same tools, same memory.
 
-Built and tested on an **RTX 5080 Laptop GPU (16 GB)** running fully local models.
+Built and tested on an **RTX 5080 Laptop GPU (16 GB)**.
 
 ---
 
@@ -49,15 +49,17 @@ Built and tested on an **RTX 5080 Laptop GPU (16 GB)** running fully local model
 
 | Feature | Details |
 |---|---|
-| 🗣️ **Speech-to-speech** | Nemotron VoiceChat 11B (GGUF, Q4) — one model handles STT + reasoning + TTS for minimal latency |
-| 🧩 **Modular pipeline** | Whisper ASR → any OpenAI-compatible LLM → OmniVoice / Edge TTS |
-| 👁️ **Screen vision** | Native multimodal perception (mmproj) or a dedicated VLM (Qwen2-VL) via OpenAI-compatible API |
-| 🖱️ **Computer control** | 8 tools: screenshot, click, drag, scroll, type, key combos, open app, run command |
-| 🛑 **Kill-switch** | Global `Ctrl+Alt+Q` hotkey — every input action checks it mid-flight, even aborting drags partway |
-| 🎚️ **Autonomy levels** | `full` / `auto_safe` / `confirm` — gate dangerous actions like shell commands |
-| 💻 **Two interfaces** | Terminal push-to-talk + web dashboard (mic, chat, live screenshot, kill button) |
-| ♻️ **Single shared model** | One model process across all dashboard connections — no RAM/VRAM pile-up on refresh |
-| 🔁 **Clean provider switching** | Old model fully unloaded (RAM/VRAM freed) before a new one loads |
+| 👂 **Hands-free VAD** | Always-listening mic with end-of-speech detection — no buttons, just talk |
+| 🔇 **Echo guard** | Mic gate closes while the assistant speaks so it never hears itself |
+| 🗣️ **Speech-to-speech** | Nemotron VoiceChat 11B (GGUF Q4) — STT + reasoning + TTS in one model |
+| 🧩 **Modular pipeline** | Any ASR → any OpenAI-compat LLM → any TTS, swappable at runtime |
+| 💬 **Hours-long memory** | Persistent JSONL sessions + rolling context + auto-summarization |
+| ☁️ **Online profiles** | `local` / `online-openai` / `online-groq` — one dropdown, env-var API keys |
+| 👁️ **Screen vision** | Native mmproj perception or dedicated VLM (Qwen2-VL) |
+| 🖱️ **Computer control** | 8 tools: screenshot, click, drag, scroll, type, keys, apps, shell |
+| ⏹️ **Barge-in** | Stop button interrupts playback instantly; mic reopens |
+| 🛑 **Kill-switch** | Global `Ctrl+Alt+Q` gates every input action mid-flight |
+| ⚡ **Latency badge** | Per-turn response time shown live |
 
 ---
 
@@ -66,51 +68,76 @@ Built and tested on an **RTX 5080 Laptop GPU (16 GB)** running fully local model
 ```
 ┌────────────────────────────── assistant core ──────────────────────────────┐
 │                                                                            │
-│  🎙️ mic / ⌨️ text ──►  Provider (runtime-swappable):                       │
+│  👂 mic ──► VAD engine ──► utterance wav ──┐      (echo-guarded)          │
+│  ⌨️ text ──────────────────────────────────┤                               │
+│                                            ▼                               │
+│  Provider (runtime-swappable):                                             │
+│    voicechat   Nemotron VoiceChat 11B GGUF (speech→speech, one model)      │
+│    modular     ASR → LLM(+memory) → TTS   [local or online profile]        │
+│    hybrid      VoiceChat voice + Qwen2-VL screen vision                    │
+│                                            │                               │
+│  💬 memory ◄── rolling context + summary ──┤                               │
+│                                            ▼                               │
+│  🧠 tool loop ──► JSON tool calls → ToolExecutor → results fed back        │
 │                                                                            │
-│    ┌──────────────────────────────────────────────────────────────────┐    │
-│    │ voicechat   Nemotron VoiceChat 11B GGUF via llama-voicechat.exe  │    │
-│    │            speech-in → speech-out, ONE model, GPU offload        │    │
-│    │ modular    Whisper server → OpenAI-compat LLM → TTS              │    │
-│    │ hybrid     VoiceChat (voice) + Qwen2-VLM (screen vision)         │    │
-│    └──────────────────────────────────────────────────────────────────┘    │
-│                                                                            │
-│  🖼️ screen ──► ScreenCapture (MSS → PIL fallback, cached, hashed)          │
-│                 └► VLM describe / mmproj perception                        │
-│                                                                            │
-│  🧠 tool loop ──► model emits JSON tool calls →                            │
-│        ToolExecutor ──► results fed back → repeat until final answer       │
-│                                                                            │
-│  🛡️ safety ──► KillSwitch hotkey + autonomy gating on EVERY action         │
+│  🛡️ safety ──► kill-switch hotkey + autonomy gating on EVERY action        │
 └────────────────────────────────────────────────────────────────────────────┘
         │                                   │
-   terminal (push-to-talk)        web dashboard (HTTP + WS, one port)
-                                  mic ∙ chat ∙ live screenshot ∙ kill button
+   terminal (--hands-free)          web dashboard
+                          mic ∙ chat ∙ audio queue ∙ stop ∙ live screenshot ∙
+                          tool stream ∙ provider/profile pickers ∙ kill button
 ```
-
-### Text input on voice-native providers
-
-The VoiceChat model accepts only audio turns. Typed text is handled by
-**edge-tts synthesis → ffmpeg (16 kHz mono WAV) → normal voice turn**, so the
-text box works with every provider.
 
 ---
 
-## Providers
+## Hands-Free Mode (VAD)
 
-| Provider | Voice | Vision | External services needed | Best for |
-|---|---|---|---|---|
-| `voicechat` | ✅ Nemotron VoiceChat 11B (speech-to-speech) | ✅ mmproj perception | None — self-launches `llama-voicechat.exe` | Lowest latency, simplest setup |
-| `modular` | ✅ Whisper → LLM → TTS | ❌ (text-only) | Whisper server `:9000`, OpenAI-compat LLM `:8081`, OmniVoice `:8889` or Edge TTS | Flexibility — swap any LLM |
-| `hybrid` | ✅ VoiceChat | ✅ dedicated VLM (`:8082`, e.g. Qwen2-VL) | VoiceChat deps + a VLM server | Best screen understanding |
+The flagship ChatGPT-Voice-style experience:
 
-Notes:
+```
+👂 ON → you talk → silence detected (~700 ms) → utterance sent →
+assistant replies (mic gated) → playback ends → hangover → listening again
+```
 
-- The **function-head GGUF** variant (native tool-calling) is attempted first;
-  if the installed `llama-voicechat.exe` doesn't support its architecture, the
-  provider automatically falls back to the standard STT-LLM model.
-- The modular provider drives tool-calling via a JSON prompt convention and
-  parses fenced JSON / bare JSON / XML-style tool-call formats.
+- **WebRTC VAD** (CPU-light, robust) with an adaptive **energy VAD** fallback
+- Speech-start confirmed after ~90 ms of voice; end-of-speech after 700 ms silence
+- **Echo guard**: while the reply plays, the mic gate is closed — no self-hearing loops
+- Toggle in the dashboard (`👂 Hands-free`) or run `python -m pai.terminal --hands-free`
+
+---
+
+## Memory — Hours-Long Conversations
+
+`ConversationStore` gives the assistant durable context:
+
+- Every turn appended to `sessions/<name>.jsonl` — survives restarts
+- Last N turns (`memory_turns: 24`) sent as rolling context every request
+- Past that, older turns fold into a running **summary** kept at the front of the prompt (extractive by default; plug an LLM summarizer via `set_summarizer`)
+- `reset()` archives the session and starts fresh
+
+---
+
+## Providers & Profiles
+
+### Brains (what powers the conversation)
+
+| Provider | Voice | Vision | Needs |
+|---|---|---|---|
+| `voicechat` | Nemotron VoiceChat 11B speech-to-speech | mmproj perception | nothing — self-launches |
+| `modular` | ASR → LLM → TTS pipeline | — | backend services per profile |
+| `hybrid` | VoiceChat | + Qwen2-VL | voicechat deps + VLM server |
+
+### Profiles (where those services live)
+
+| Profile | ASR | LLM | TTS | Offline? | Env key |
+|---|---|---|---|---|---|
+| `💻 local` *(default)* | Whisper server :9000 | any OpenAI-compat :8081 | OmniVoice :8889 / edge-tts | ✅ yes | — |
+| `☁ online-openai` | Whisper API | GPT-4o-mini | OpenAI TTS | ❌ | `OPENAI_API_KEY` |
+| `☁ online-groq` | whisper-large-v3 | Llama-3.3-70B | browser Web Speech | ❌ | `GROQ_API_KEY` |
+
+Switch profiles from the dashboard dropdown — mid-session, no reload. Keys are read from environment variables only (never stored in config).
+
+> **Groq note:** its free-tier API has no TTS endpoint, so replies are spoken by your browser's built-in Web Speech synthesis — zero extra latency, zero cost.
 
 ---
 
@@ -118,65 +145,29 @@ Notes:
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `screenshot` | `monitor` | Returns PNG for vision; hashed for change detection |
-| `click` | `x, y, button?, double?` | Sub-pixel positioning, animated move |
-| `drag` | `x1, y1, x2, y2` | Abortable mid-drag by kill-switch |
-| `scroll` | `amount, x?, y?` | Positive = up |
-| `type_text` | `text` | Types literal text |
-| `press_key` | `key` | Combos supported: `enter`, `ctrl+s`, `win`, … |
-| `open_app` | `target` | Resolves common names or full paths |
-| `run_command` | `command` | Shell; **blocked unless `autonomy: full`** |
+| `screenshot` | `monitor`, `max_width` | auto-downscaled for VLM payloads |
+| `click` | `x, y, button?, double?` | animated move, validated buttons |
+| `drag` | `x1, y1, x2, y2` | abortable mid-drag by kill-switch |
+| `scroll` | `amount, x?, y?` | positive = up |
+| `type_text` | `text` | literal typing |
+| `press_key` | `key` | full pynput table: `f5`, `pgup`, `ctrl+s`, media keys… |
+| `open_app` | `target` | name resolution + sanitized shell fallback |
+| `run_command` | `command` | **blocked unless autonomy=full** |
+
+Every execution is streamed to the dashboard's live tool panel.
 
 ---
 
 ## Safety
 
-Autonomous control is powerful — guardrails are built into the core, not bolted on:
-
-- **Kill-switch hotkey** (`Ctrl+Alt+Q`, toggle): checked before *and during*
-  every mouse/keyboard action. A drag in progress stops mid-way. Works even if
-  the dashboard is closed.
-- **Dashboard kill button** — same toggle, one click.
-- **Autonomy levels**:
-  - `full` — everything allowed (your default)
-  - `auto_safe` — safe tools only, `run_command` blocked
-  - `confirm` — destructive actions blocked
-- **Process hygiene** — the server keeps exactly one model process; switching
-  providers fully unloads the old model (graceful exit → kill → `taskkill`
-  sweep) before loading the next, so RAM/VRAM never piles up.
+- **Kill-switch hotkey** `Ctrl+Alt+Q` — checked before *and during* every input action; drags abort mid-way; dashboard button too
+- **Autonomy levels**: `confirm` (view-only) / `auto_safe` (no shell) / `full`
+- **Process hygiene** — exactly one model process ever; switching providers unloads the old model first; Ctrl+C sweeps orphans and frees ports
+- **Stale-port takeover** — a crashed instance's port is detected and released automatically
 
 ---
 
 ## Installation
-
-### Prerequisites
-
-- **Windows 10/11**
-- **Python 3.10+**
-- **FFmpeg** on `PATH` (used for audio conversion) — `choco install ffmpeg`
-- (Optional) NVIDIA GPU + the assets below
-
-### Model assets
-
-Place/link these (already configured via `src/pai/config.py` paths):
-
-```
-D:\hoidhxd-NVIDIA-NemotronLabs-VoiceChat-11B-GGUF\
-  llama-voicechat.exe
-  llamacpp\
-    nemotron_voicechat_11b-stt-llm-Q4_0.gguf
-    nemotron_voicechat_11b-stt-llm-Q4_0-function-head.gguf
-    mmproj-voicechat-perception-Q4_0.gguf
-    voicechat-tts-Q4_0.gguf
-```
-
-For `modular`/`hybrid`, also run:
-- Whisper server (e.g. `whisper_server.py` from your dubbing stack) on `:9000`
-- Any OpenAI-compatible LLM server on `:8081`
-- OmniVoice TTS on `:8889` (or use online Edge TTS)
-- A VLM server (e.g. Qwen2-VL via llama.cpp) on `:8082` for `hybrid`
-
-### Setup
 
 ```bash
 cd D:\Agents-and-other-repos\PersonalAI-Assistant
@@ -186,63 +177,54 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+Requirements: Windows 10/11, Python 3.10+, FFmpeg on PATH.
+Optional GPU models go in `D:\hoidhxd-NVIDIA-NemotronLabs-VoiceChat-11B-GGUF\` (path configurable in `src/pai/config.py`).
+
+For the `local` profile's modular provider, also run: Whisper server (:9000), an OpenAI-compatible LLM (:8081), OmniVoice (:8889). For online profiles, set `OPENAI_API_KEY` / `GROQ_API_KEY`.
+
 ---
 
 ## Usage
 
-### Terminal Interface
-
 ```bash
-python -m pai.terminal                          # provider from config.yaml
-python -m pai.terminal --provider modular       # pick a brain
-python -m pai.terminal --seconds 6              # fixed recording window
-python -m pai.terminal --autonomy confirm       # cautious mode
+# Web dashboard (recommended — full UX)
+python -m pai.server            # → http://127.0.0.1:8765
+
+# Terminal push-to-talk
+python -m pai.terminal
+
+# Terminal hands-free (just talk)
+python -m pai.terminal --hands-free
+
+# Options
+python -m pai.terminal --provider modular --autonomy confirm --seconds 6
 ```
 
-Press **Enter** to record (Enter again to stop when `push_to_talk_seconds: 0`),
-speak, and the assistant replies with voice + text. `q` quits.
-
-### Web Dashboard
-
-```bash
-python -m pai.server
-```
-
-Open **http://127.0.0.1:8765** — HTTP and WebSocket share one port.
-
-- **Provider dropdown** — switches brains; old model unloads first
-- **🎙 Hold** — press-and-hold to record, release to send
-- **Text box** — typed input (synthesized to speech for voice-only models)
-- **📸 Screenshot** — see exactly what the assistant sees
-- **🛑 Kill-switch** — engage/release input control
-- Replies arrive as both text and inline audio playback
+Dashboard controls: provider dropdown · profile dropdown (offline/online) ·
+🎙 hold-to-talk · 👂 hands-free toggle · ⏹ Stop (barge-in) · text input ·
+📸 screenshot · 🛑 kill-switch · live tool panel · latency badge.
 
 ---
 
 ## Configuration
 
-All settings live in `config.yaml` (auto-loaded; code defaults in
-`src/pai/config.py`):
+`config.yaml` (all optional):
 
 ```yaml
-provider: voicechat          # voicechat | modular | hybrid
+provider: voicechat            # voicechat | modular | hybrid
+profile: local                 # local | online-openai | online-groq
 
-# modular pipeline
-llm_base_url: http://127.0.0.1:8081/v1
-llm_model: hy-mt2
-tts_backend: omnivoice       # omnivoice | edge
+hands_free: true
+vad_engine: auto               # auto | webrtc | energy
+vad_silence_ms: 700            # end-of-speech detection
+vad_aggressiveness: 2
 
-# hybrid vision
-vlm_base_url: http://127.0.0.1:8082/v1
-vlm_model: qwen2-vl
+memory_turns: 24               # rolling context window
+memory_summarize_after: 40
+session_name: default          # sessions/<name>.jsonl
 
-# audio
-push_to_talk_seconds: 0      # 0 = record until Enter
-
-# autonomy & safety
-autonomy: full               # full | auto_safe | confirm
+autonomy: full                 # confirm | auto_safe | full
 kill_switch_keys: ctrl+alt+q
-
 dashboard_port: 8765
 ```
 
@@ -251,39 +233,38 @@ dashboard_port: 8765
 ## Testing
 
 ```bash
-venv\Scripts\activate
-python test_smoke.py         # 22 checks: capture, tool parser, gating, providers
+python test_smoke.py         # 32 checks: capture, tools, autonomy, VAD-ready, providers
 python test_integration.py   # dashboard HTTP + WS + live screenshot round-trip
 ```
 
-Current status: **22/22 smoke checks passing, integration PASS**, real model
-boot verified (ready event, clean teardown, single shared process across
-reconnects).
+All passing, plus live-verified: model boot/fallback, single-process guarantee,
+graceful shutdown, stale takeover, hands-free toggles, profile switches,
+end-to-end audio turns.
 
 ---
 
 ## Project Structure
 
 ```
-PersonalAI-Assistant/
-├── src/pai/
-│   ├── config.py              # paths + swappable settings (config.yaml)
-│   ├── providers.py           # provider registry
-│   ├── provider_voicechat.py  # speech-to-speech loop w/ tool rounds + fallbacks
-│   ├── provider_modular.py    # Whisper → LLM → TTS pipeline
-│   ├── provider_hybrid.py     # VoiceChat voice + VLM screen description
-│   ├── screen_capture.py      # MSS→PIL fallback capture, cache + stats
-│   ├── input_control.py       # pynput mouse/keyboard + global KillSwitch
-│   ├── tools.py               # JSON tool protocol → actions, autonomy gating
-│   ├── audio.py               # mic recording + wav/mp3 playback
-│   ├── terminal.py            # push-to-talk CLI
-│   └── server.py              # web dashboard (HTTP + WebSocket, one port)
-├── static/index.html          # dashboard UI (dark, zero-build)
-├── config.yaml                # user-editable runtime config
-├── test_smoke.py              # 22 unit checks
-├── test_integration.py        # live server + WS round-trip
-├── requirements.txt
-└── pyproject.toml
+src/pai/
+  config.py              paths, PROFILES (local/online), VAD + memory settings
+  server.py              web dashboard: HTTP+WS, shared provider lifecycle,
+                         hands-free loop wiring, graceful shutdown
+  terminal.py            push-to-talk + --hands-free CLI
+  vad.py                 WebRTC/energy VAD state machines, echo guard,
+                         continuous mic listener
+  memory.py              ConversationStore: JSONL persistence, rolling
+                         context, summarization
+  providers.py           registry
+  provider_voicechat.py  Nemotron speech-to-speech (file protocol)
+  provider_modular.py    ASR→LLM(+memory)→TTS, local+online backends
+  provider_hybrid.py     VoiceChat + VLM screen description
+  screen_capture.py      MSS→PIL fallback, caching, downscaling
+  input_control.py       pynput control + global KillSwitch
+  tools.py               JSON tool protocol, autonomy matrix, event stream
+  audio.py               mic record / playback
+static/index.html        dashboard UI (dark, zero-build)
+sessions/                persistent conversation JSONL files
 ```
 
 ---
@@ -292,24 +273,25 @@ PersonalAI-Assistant/
 
 | Component | Minimum | Tested |
 |---|---|---|
-| GPU | 8 GB VRAM (Q4 quantized models) | RTX 5080 Laptop 16 GB |
+| GPU (voicechat/hybrid) | 8 GB VRAM | RTX 5080 Laptop 16 GB |
 | RAM | 16 GB | 32 GB |
-| Disk | ~10 GB (model assets) | — |
+| Disk | ~10 GB models | — |
 
-The `voicechat` provider loads in ~10 s on the tested hardware and holds one
-~6.3 GB process. CPU-only inference works but with higher latency.
+No GPU? Use the `modular` provider with an **online profile**, or a small CPU
+LLM via llama.cpp (`llm_base_url`). Everything else (VAD, capture, tools,
+dashboard) is CPU-native.
 
 ---
 
 ## Roadmap
 
-- [ ] Streaming mic with VAD (hands-free, no push-to-talk)
-- [ ] UIA element-tree tool (click by element name, not coordinates)
-- [ ] Wire screenshots into VoiceChat's `image` turn field for native vision Q&A
-- [ ] Function-head GGUF support (native tool calls) once the exe build supports it
-- [ ] Conversation memory / context persistence across sessions
-- [ ] Multi-monitor aware capture + coordinate mapping
-- [ ] Packaging as a system-tray app
+- [ ] Streaming/staged TTS (speak first sentence while generating rest)
+- [ ] Wake word ("hey assistant") before VAD hand-off
+- [x] ~~UIA element-tree clicking~~ → coordinates + screenshots work well today; element-name clicking next
+- [ ] Wire screenshots into VoiceChat image turns natively
+- [ ] Function-head GGUF support once exe builds support the architecture
+- [ ] LLM-backed conversation summarizer hook-up
+- [ ] System-tray app packaging
 
 ---
 
@@ -317,24 +299,20 @@ The `voicechat` provider loads in ~10 s on the tested hardware and holds one
 
 | Symptom | Fix |
 |---|---|
-| `error 10048` on server start | Another instance holds port 8765 — stop it or change `dashboard_port` |
-| Dashboard loops "connection closed" in server log | Old cached page — hard-refresh the browser (`Ctrl+F5`) |
-| `(timeout waiting for voicechat)` | First model load can take a minute; if persistent, check GPU memory (`nvidia-smi`) for orphans |
-| `unknown model architecture: voicechat_function_head` | Expected on older exe builds — the provider auto-falls back to the standard model |
-| No mic in browser | Use `http://127.0.0.1:8765` exactly (not `localhost` IP variants), allow mic permission |
-| Zombie model processes | Fixed by shared-provider design; if seen, `taskkill /F /IM llama-voicechat.exe` |
+| `error 10048` port busy | Auto-handled — stale instance is killed; retry if persistent |
+| Dashboard "connection closed" loop | Hard-refresh (`Ctrl+F5`) |
+| `(timeout waiting for voicechat reply)` | First load ~10 s; check `nvidia-smi` for VRAM orphans |
+| `unknown model architecture: voicechat_function_head` | Normal on older exe builds — auto-falls back |
+| Mic never triggers in hands-free | Check default mic in Windows settings; try `vad_engine: energy` |
+| Modular: connection refused :8081/:9000 | Start those services, or switch profile to online |
+| numpy/PIL `ImportError` (wrong cp version) | `pip install --force-reinstall numpy pillow` in the project venv |
 
 ---
 
 ## Acknowledgements
 
-Built on top of these local assets:
-
-- **Nemotron VoiceChat 11B** (NVIDIA NemotronLabs) — GGUF speech-to-speech model
-- **llama.cpp** — the `llama-voicechat` server runtime
-- **Whisper / OmniVoice / Edge TTS** — modular ASR/TTS stack
-- **Qwen2-VL** — screen vision for the hybrid provider
-- **pynput / mss** — input control and screen capture
+Nemotron VoiceChat 11B (NVIDIA) · llama.cpp · Whisper · OmniVoice · Edge TTS ·
+Qwen2-VL · webrtcvad · pynput · mss
 
 ---
 
