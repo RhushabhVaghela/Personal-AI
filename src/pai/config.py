@@ -101,6 +101,11 @@ class Config:
     vad_aggressiveness: int = 2
     vad_silence_ms: int = 700                # end-of-speech hangover
     vad_min_utterance_ms: int = 300
+    # wake word ("proactive audio")
+    wake_phrases: list = field(default_factory=lambda: [
+        "hey assistant", "assistant", "computer"])  # transcript gate
+    wake_oww_models: list = field(default_factory=lambda: [
+        "hey_jarvis", "alexa"])              # openWakeWord audio models
     # memory
     memory_turns: int = 24                   # rolling context window
     memory_summarize_after: int = 40

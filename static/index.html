@@ -218,6 +218,7 @@ function connect(){
         `voice: ${m.voice.split("-").slice(2,3)[0]||m.voice} @ ${m.speed}×`;
         break;
       case "session": renderSession(m); break;
+      case "card": showCard(m.card, m); break;
       case "vad": $("status").textContent = "listening…"; break;
     }
   };
@@ -236,6 +237,37 @@ function showCaption(text){
   capEl.style.display = "block";
   clearTimeout(capTimer);
   capTimer = setTimeout(()=>capEl.style.display="none", Math.min(12000, 2500+text.length*55));
+}
+/* answer cards — GPT-Live visual widgets parity */
+const cardEl = document.createElement("div");
+cardEl.style.cssText = "position:fixed;top:64px;right:16px;width:230px;z-index:98;"+
+  "display:none;flex-direction:column;gap:8px";
+document.body.appendChild(cardEl);
+function showCard(kind, d){
+  let html = "";
+  if(kind === "weather"){
+    html = `<div style="background:linear-gradient(135deg,#3a5bd9,#7048c9);border-radius:14px;padding:12px 14px;color:#fff">
+      <div style="font-size:26px;font-weight:700">${d.temp_c}°C</div>
+      <div style="opacity:.9">${d.desc||""}</div>
+      <div style="opacity:.75;font-size:12px">${d.location||""} · feels ${d.feels_c}° · 💧${d.humidity}%</div></div>`;
+  } else if(kind === "clock"){
+    html = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px 14px">
+      <div style="font-size:26px;font-weight:700">${d.time}</div>
+      <div style="color:var(--muted);font-size:12px">${d.date||""}</div></div>`;
+  } else if(kind === "reminder"){
+    html = `<div style="background:#5a2d0c;border-radius:14px;padding:12px 14px;color:#ffd9a8">
+      <div style="font-weight:600">⏰ Reminder set</div>
+      <div style="font-size:13px;margin-top:2px">${(d.text||"").replace(/</g,"&lt;")}</div>
+      <div style="opacity:.8;font-size:12px">due ${d.due}</div></div>`;
+  } else return;
+  const w = document.createElement("div");
+  w.innerHTML = html;
+  const node = w.firstChild;
+  cardEl.prepend(node);
+  cardEl.style.display = "flex";
+  while(cardEl.children.length > 3) cardEl.lastChild.remove();
+  setTimeout(()=>{ node.remove();
+    if(!cardEl.children.length) cardEl.style.display="none"; }, 20000);
 }
 let tUser = 0;
 function setKill(on){

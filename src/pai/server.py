@@ -40,6 +40,8 @@ _HANDSFREE = {"thread": None, "stop": None, "engine": None,
               "session": None}
 _WAKE_GATE = {"gate": None}
 _SHARE = {"streamer": None}
+_SCHEDULER = {"stop": None}
+_CLIENTS: set = set()   # live dashboard websockets (for proactive pushes)
 
 
 async def _get_shared_provider(name: str):
@@ -80,7 +82,8 @@ class AssistantSession:
         self.executor = tools.ToolExecutor(
             autonomy=self.cfg.autonomy,
             on_screenshot=self._push_screenshot,
-            on_event=self._push_tool_event)
+            on_event=self._push_tool_event,
+            on_card=self._push_card)
         self.latest_png: bytes | None = None
 
     @property
@@ -101,6 +104,42 @@ class AssistantSession:
             asyncio.run_coroutine_threadsafe(
                 self.send("tool", text=line, ok=bool(entry.get("ok"))),
                 _MAIN_LOOP)
+
+    def _push_card(self, kind: str, data: dict) -> None:
+        """Answer cards (GPT-Live widgets): clock, weather, reminder…"""
+        if _MAIN_LOOP is not None and _MAIN_LOOP.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.send("card", card=kind, **data), _MAIN_LOOP)
+
+    async def deliver_reminder(self, item: dict) -> None:
+        """Proactive speech: the assistant speaks up on its own."""
+        text = f"Reminder: {item['text']}"
+        log.info("delivering reminder: %s", item["text"][:60])
+        await self.send("reply", text=f"⏰ {text}")
+        provider = _active_provider
+        if provider is not None and getattr(provider, "name", "") == "modular":
+            try:
+                loop = asyncio.get_running_loop()
+                spoken = await loop.run_in_executor(
+                    None, provider.speak, text,
+                    LOG_DIR / "reminder.wav")
+                await self._send_audio(spoken)
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("reminder TTS failed (%s) — text only", exc)
+        # non-modular: send a tiny edge-tts clip best-effort
+        try:
+            import asyncio as _a
+
+            async def _synth():
+                import edge_tts
+                mp3 = Path(__import__("tempfile").gettempdir()) / "pai_rem.mp3"
+                await edge_tts.Communicate(text).save(str(mp3))
+                return mp3
+            mp3 = await _synth()
+            await self._send_audio(mp3)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reminder fallback TTS failed: %s", exc)
 
     async def send(self, kind: str, **data) -> None:
         try:
@@ -153,7 +192,8 @@ class AssistantSession:
             if on:
                 if _WAKE_GATE["gate"] is None:
                     _WAKE_GATE["gate"] = WakeWordGate(
-                        phrases=msg.get("phrases") or None)
+                        phrases=msg.get("phrases") or self.cfg.wake_phrases,
+                        oww_models=getattr(self.cfg, "wake_oww_models", None))
                 _WAKE_GATE["gate"].activate()   # first turn free, then re-arms
                 await self._toggle_hands_free(True)
                 await self.send("wake_mode", on=True,
@@ -513,6 +553,7 @@ class AssistantSession:
 async def handler(ws) -> None:
     session: AssistantSession | None = None
     log.info("dashboard client connected")
+    _CLIENTS.add(ws)
     try:
         async for raw in ws:
             msg = json.loads(raw)
@@ -528,6 +569,7 @@ async def handler(ws) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("ws error: %s", exc)
     finally:
+        _CLIENTS.discard(ws)
         # NOTE: the shared provider is intentionally NOT stopped on
         # disconnect — it is reused by the next dashboard connection.
         # It is stopped only on provider switch (_get_shared_provider)
@@ -629,6 +671,41 @@ async def main() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     _MAIN_LOOP = loop  # worker threads use this to emit tool events
+
+    # reminder scheduler → proactive speech via a lightweight session shim
+    from .reminders import ReminderStore, start_scheduler
+    rem_store = ReminderStore()
+
+    async def _deliver(item):
+        # synthesize + broadcast to all connected dashboards
+        text = f"Reminder: {item['text']}"
+        log.info("delivering reminder: %s", item["text"][:60])
+        try:
+            import edge_tts, tempfile
+            mp3 = Path(tempfile.gettempdir()) / "pai_rem.mp3"
+            await edge_tts.Communicate(text).save(str(mp3))
+            data = base64.b64encode(mp3.read_bytes()).decode()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reminder TTS failed: %s", exc)
+            data = None
+        # broadcast to every connected dashboard (tracked globally)
+        for cli in list(_CLIENTS):
+            try:
+                await cli.send("reply", text=f"⏰ {text}")
+                if data:
+                    await cli.send("audio", data=data, format="mp3",
+                                   seq=int(time.time() * 1000))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_due(item):
+        if _MAIN_LOOP and _MAIN_LOOP.is_running():
+            asyncio.run_coroutine_threadsafe(_deliver(item), _MAIN_LOOP)
+
+    _SCHEDULER["stop"] = start_scheduler(rem_store, _on_due)
+    log.info("reminder scheduler running (%d pending)",
+             len(rem_store.list_pending()))
+
     sigs = [signal.SIGINT, signal.SIGTERM]
     if hasattr(signal, "SIGBREAK"):
         sigs.append(signal.SIGBREAK)  # Windows Ctrl+Break / CTRL_BREAK_EVENT

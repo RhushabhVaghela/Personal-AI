@@ -32,7 +32,8 @@ class WakeWordGate:
     def __init__(self,
                  phrases: list[str] | None = None,
                  active_timeout: float = 90.0,
-                 use_openwakeword: bool = True):
+                 use_openwakeword: bool = True,
+                 oww_models: list[str] | None = None):
         self.phrases = [p.lower() for p in (phrases or [
             "hey assistant", "hey assistant.", "assistant",
             "computer"])]
@@ -42,8 +43,10 @@ class WakeWordGate:
         self._oww_frame_size = 1280   # 80ms @16k
         if use_openwakeword and HAS_OWW:
             try:
-                # preloaded stock models incl. "hey jarvis"/"alexa" style
-                self._oww = OwwModel()
+                if oww_models:
+                    self._oww = OwwModel(wakeword_models=list(oww_models))
+                else:
+                    self._oww = OwwModel()
                 log.info("wake word: openWakeWord loaded (%d models)",
                          len(self._oww.models))
             except Exception as exc:  # noqa: BLE001

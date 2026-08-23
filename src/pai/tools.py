@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -41,6 +42,16 @@ def tool_schema() -> list[dict]:
          "params": {"monitor": "int, default 0"}},
         {"name": "look_at_screen", "description": "Inspect the latest shared screen frame (use when screen sharing is active and the user asks about what they see).",
          "params": {}},
+        {"name": "set_reminder", "description": "Set a reminder that will be SPOKEN ALOUD at the due time. Use for 'remind me...'. Natural time text goes in 'when_text', e.g. 'at 5pm', 'in 10 minutes'.",
+         "params": {"when_text": "str like 'at 5pm' or 'in 10 minutes'", "text": "str what to remind"}},
+        {"name": "list_reminders", "description": "List pending reminders.",
+         "params": {}},
+        {"name": "cancel_reminder", "description": "Cancel a reminder by id (from list_reminders).",
+         "params": {"id": "str"}},
+        {"name": "get_time", "description": "Current local date and time. Also emits a clock card to the dashboard.",
+         "params": {}},
+        {"name": "get_weather", "description": "Weather via wttr.in (no API key). Emits a weather card.",
+         "params": {"location": "str, e.g. 'Mumbai' or '' for auto-IP"}},
         {"name": "click", "description": "Click the mouse.",
          "params": {"x": "int", "y": "int", "button": "left|right|middle", "double": "bool"}},
         {"name": "drag", "description": "Drag from (x1,y1) to (x2,y2).",
@@ -62,17 +73,23 @@ class ToolExecutor:
     """Executes tool calls, records history, enforces autonomy + kill-switch."""
 
     # what each autonomy level allows
+    SAFE_INFO_TOOLS = {"get_time", "get_weather"}
     LEVELS = {
-        "confirm": {"screenshot", "look_at_screen"},
-        "auto_safe": {"screenshot", "look_at_screen", "click", "drag",
-                      "scroll", "type_text", "press_key", "open_app"},
-        "full": {"screenshot", "look_at_screen", "click", "drag", "scroll",
-                 "type_text", "press_key", "open_app", "run_command"},
+        "confirm": {"screenshot", "look_at_screen", *SAFE_INFO_TOOLS},
+        "auto_safe": {"screenshot", "look_at_screen", *SAFE_INFO_TOOLS,
+                      "set_reminder", "list_reminders", "cancel_reminder",
+                      "click", "drag", "scroll", "type_text", "press_key",
+                      "open_app"},
+        "full": {"screenshot", "look_at_screen", *SAFE_INFO_TOOLS,
+                 "set_reminder", "list_reminders", "cancel_reminder",
+                 "click", "drag", "scroll", "type_text", "press_key",
+                 "open_app", "run_command"},
     }
 
     def __init__(self, autonomy: str = "full",
                  on_screenshot: Optional[Callable[[bytes], None]] = None,
-                 on_event: Optional[Callable[[dict], None]] = None):
+                 on_event: Optional[Callable[[dict], None]] = None,
+                 on_card: Optional[Callable[[str, dict], None]] = None):
         self.autonomy = autonomy if autonomy in self.LEVELS else "full"
         if autonomy not in self.LEVELS:
             log.warning("unknown autonomy %r, using 'full'", autonomy)
@@ -80,8 +97,11 @@ class ToolExecutor:
         self._lock = threading.Lock()
         self.on_screenshot = on_screenshot
         self.on_event = on_event
+        self.on_card = on_card          # answer cards → dashboard widgets
         self.cap = screen_capture.get_capture()
         self.inp = input_control.get_input()
+        from .reminders import ReminderStore
+        self.reminders = ReminderStore()
 
     @property
     def allowed(self) -> set[str]:
@@ -111,6 +131,14 @@ class ToolExecutor:
                 pass
         return entry
 
+    def _emit_card(self, kind: str, data: dict) -> None:
+        """Push an answer card to the dashboard (GPT-Live widgets parity)."""
+        if self.on_card:
+            try:
+                self.on_card(kind, data)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _dispatch(self, name: str, p: dict):
         if name in ("screenshot", "look_at_screen"):
             if name == "look_at_screen":
@@ -136,6 +164,51 @@ class ToolExecutor:
                     pass
             return {"ok": True, "bytes": len(png),
                     "hash": self.cap.screenshot_hash()}
+        if name == "set_reminder":
+            when, cleaned = self.reminders.parse_when(
+                str(p.get("when_text", "")))
+            if when is None:
+                return {"ok": False,
+                        "error": "could not parse time — use 'at 5pm' "
+                                 "or 'in 10 minutes'"}
+            item = self.reminders.add(when, str(p.get("text", cleaned)))
+            due = datetime.fromtimestamp(item["when"]).strftime("%H:%M")
+            self._emit_card("reminder", {"text": p.get("text", cleaned),
+                                         "due": due})
+            return {"ok": True, "id": item["id"], "due": due}
+        if name == "list_reminders":
+            items = [{"id": i["id"],
+                      "due": datetime.fromtimestamp(i["when"]).strftime(
+                          "%a %H:%M"),
+                      "text": i["text"]}
+                     for i in self.reminders.list_pending()]
+            return {"ok": True, "reminders": items}
+        if name == "cancel_reminder":
+            return {"ok": self.reminders.cancel(str(p.get("id", "")))}
+        if name == "get_time":
+            now = datetime.now()
+            card = {"time": now.strftime("%H:%M"),
+                    "date": now.strftime("%A, %d %B %Y")}
+            self._emit_card("clock", card)
+            return {"ok": True, **card}
+        if name == "get_weather":
+            import requests as _rq
+            loc = str(p.get("location", "") or "")
+            try:
+                r = _rq.get(f"https://wttr.in/{loc}?format=j1",
+                            timeout=15)
+                cur = r.json()["current_condition"][0]
+                card = {"location": loc or (r.json().get(
+                            "nearest_area", [{}])[0].get(
+                            "areaName", [{"value": "?"}])[0]["value"]),
+                        "temp_c": cur["temp_C"], "feels_c": cur[
+                            "FeelsLikeC"],
+                        "desc": cur["weatherDesc"][0]["value"],
+                        "humidity": cur["humidity"]}
+                self._emit_card("weather", card)
+                return {"ok": True, **card}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": f"weather unavailable: {exc}"}
         if name == "click":
             ok = self.inp.click(p.get("x"), p.get("y"),
                                 p.get("button", "left"),
