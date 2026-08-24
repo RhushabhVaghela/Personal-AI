@@ -259,7 +259,7 @@ python -m pai.terminal --hands-free     # always-listening
 python -m pai.tray                      # system-tray app (server + icon)
 ```
 
-Dashboard header: provider · profile · voice · speed · effort · status · latency · hands-free badge · kill badge.
+Dashboard header: provider · profile · voice · 🔊 TTS engine · speed · effort · status · latency · hands-free badge · kill badge.
 Composer: text input · 🎙 hold-to-talk · 👂 hands-free · 📣 wake word · 🖥 share screen · ⏹ stop · send.
 Sidebar: 📸 screenshot · 🛑 kill-switch · 🆕 new chat · 🗒 transcript · ⬇ export · live tool panel.
 
@@ -270,21 +270,30 @@ Sidebar: 📸 screenshot · 🛑 kill-switch · 🆕 new chat · 🗒 transcript
 `config.yaml` — see the fully-commented file in the repo root. Key sections:
 
 ```yaml
-provider: voicechat            # voicechat | modular | hybrid
+provider: voicechat            # voicechat | modular | hybrid |
+                               # qwen_omni | glm_voice | moshi
 profile: local                 # local | online-openai | online-groq
 
 hands_free: true
 wake_phrases: ["hey assistant", "assistant", "computer"]
 wake_oww_models: ["hey_jarvis", "alexa"]
+wake_custom_model: ""          # your trained .onnx (optional)
 
 memory_turns: 24
 session_name: default
 
 tts_voice: en-US-AriaNeural
 tts_speed: 1.0
+tts_engine: edge               # edge | omnivoice | zipvoice | vibevoice | openai
+tts_clone_ref: ""              # your voice wav → OmniVoice clones it
+vibevoice_asr_url: ""          # optional realtime CPU ASR endpoint
+voicechat_tts_mode: native     # native | edge (re-voice Nemotron replies)
 backchannel: true
+
 reasoning_effort: instant      # instant | deep
-deep_llm_model: ""             # bigger model for deep mode
+deep_model_hf: unsloth/Qwen3-30B-A3B-GGUF:UD-Q4_K_XL
+deep_gpu_layers: 28            # attention on GPU, MoE experts in RAM
+deep_idle_unload_s: 300        # auto-unload → VRAM returns to voice model
 
 autonomy: full                 # confirm | auto_safe | full
 kill_switch_keys: ctrl+alt+q
@@ -296,7 +305,7 @@ dashboard_port: 8765
 ## Testing
 
 ```bash
-python test_smoke.py         # 32 checks
+python test_smoke.py         # 35 checks
 python test_integration.py   # dashboard HTTP + WS round-trip
 ```
 
@@ -322,6 +331,8 @@ src/pai/
   memory.py              ConversationStore: JSONL, rolling window, LLM summaries
   reminders.py           persistent store, natural-time parser, scheduler
   gcal.py                optional Google Calendar mirror for reminders
+  stream_sanitizer.py    dual-channel FSM: strips <think>-style reasoning
+                         from SSE streams (UI/TTS/tool-parser protection)
   provider_voicechat.py  Nemotron speech-to-speech (file protocol)
   provider_modular.py    ASR→LLM(+memory/tools)→TTS, local + online
   provider_hybrid.py     VoiceChat + VLM screen description
