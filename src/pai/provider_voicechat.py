@@ -150,11 +150,30 @@ class VoiceChatProvider:
         """Send one voice turn using the exe's file-based protocol.
 
         Protocol (matches push_to_talk.py):
-          -> {"cmd":"turn", "audio": <in.wav>, "out": <out.wav>}
+          -> {"cmd":"turn", "audio": <in.wav>, "out": <out.wav>, "image": ...}
           <- reply WAV written to <out.wav> when generation finishes
+
+        Native vision: if screen sharing is active and no explicit image was
+        given, the latest shared frame is attached so mmproj perception can
+        see what the user sees.
         """
         if not self.is_running():
             self.start()
+        if image_path is None:
+            try:
+                from . import server as _srv
+                s = _srv._SHARE.get("streamer")
+                if s and s.latest_png:
+                    img = config.VOICECHAT_DIR / "pai_screen.jpg"
+                    from PIL import Image
+                    import io as _io
+                    Image.open(_io.BytesIO(s.latest_png)).convert("RGB")\
+                        .save(img, "JPEG", quality=80)
+                    image_path = img
+                    log.info("turn: attaching shared screen frame (%d KB)",
+                             img.stat().st_size // 1024)
+            except Exception:  # noqa: BLE001
+                pass
         out_wav = config.VOICECHAT_DIR / f"pai_answer_{self._turn_seq % 4}.wav"
         self._turn_seq += 1
         if out_wav.exists():

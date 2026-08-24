@@ -15,3 +15,4 @@ edge-tts>=6.1.0   # modular TTS fallback (free, online)
 webrtcvad-wheels>=2.0.14
 openwakeword>=0.6.0
 onnxruntime>=1.17
+opencv-python-headless>=4.9

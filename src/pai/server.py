@@ -39,7 +39,7 @@ _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 _HANDSFREE = {"thread": None, "stop": None, "engine": None,
               "session": None}
 _WAKE_GATE = {"gate": None}
-_SHARE = {"streamer": None}
+_SHARE = {"streamer": None, "cam": None}
 _SCHEDULER = {"stop": None}
 _CLIENTS: set = set()   # live dashboard websockets (for proactive pushes)
 
@@ -226,7 +226,10 @@ class AssistantSession:
         elif kind == "session":
             await self._handle_session(msg)
         elif kind == "share_screen":
-            await self._toggle_share_screen(bool(msg.get("on")))
+            if msg.get("camera"):
+                await self._toggle_webcam(bool(msg.get("on")))
+            else:
+                await self._toggle_share_screen(bool(msg.get("on")))
         elif kind == "stop_speak":
             # user interrupted the assistant: stop audio + reopen the mic
             _HANDSFREE["engine"].set_speaking(False) \
@@ -283,6 +286,22 @@ class AssistantSession:
                             summary=mem.summary, stats=mem.stats())
 
     # -- hands-free (VAD) ---------------------------------------------------------
+
+    async def _toggle_webcam(self, on: bool) -> None:
+        from .webcam import WebcamCapture
+        if on and not _SHARE["cam"]:
+            cam = WebcamCapture()
+            if not cam.start():
+                await self.send("error",
+                                text="webcam unavailable (install opencv-python?)")
+                return
+            _SHARE["cam"] = cam
+            await self.send("share_screen", on=True, camera=True)
+            await self.send("status", text="📷 camera sharing")
+        elif not on and _SHARE["cam"]:
+            _SHARE["cam"].stop()
+            _SHARE["cam"] = None
+            await self.send("share_screen", on=False, camera=True)
 
     async def _toggle_share_screen(self, on: bool) -> None:
         if on and not _SHARE["streamer"]:

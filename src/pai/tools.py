@@ -143,6 +143,16 @@ class ToolExecutor:
         if name in ("screenshot", "look_at_screen"):
             if name == "look_at_screen":
                 from . import server as _srv  # late import (circular-safe)
+                # prefer webcam frame when camera sharing is active
+                cam = _srv._SHARE.get("cam")
+                if cam:
+                    jpg = cam.read_jpeg()
+                    if jpg and self.on_screenshot:
+                        try:
+                            self.on_screenshot(jpg)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return {"ok": True, "source": "webcam"}
                 streamer = _srv._SHARE.get("streamer")
                 if streamer and streamer.latest_png:
                     png = streamer.latest_png
