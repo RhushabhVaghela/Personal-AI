@@ -65,13 +65,15 @@ Built and tested on an **RTX 5080 Laptop GPU (16 GB)**.
 | Conversation memory across sessions | ✅ | ✅ | ✅ JSONL + rolling summary |
 | Transcript history + export | ✅ in chat | ✅ in app | ✅ panel + JSONL export |
 | Screen sharing | ✅ Advanced mode | ✅ | ✅ continuous stream + tool |
-| Live video/camera | ✅ mobile | ✅ + overlays | ➖ N/A (desktop; webcam possible) |
-| App integrations (Calendar/Tasks) | limited | ✅ Google apps | ⚠️ reminders built-in; calendar sync planned |
+| Live video/camera | ✅ mobile | ✅ + overlays | ✅ webcam mode (OpenCV) |
+| Streaming TTS (speak-while-generating) | ✅ | ✅ | ✅ sentence-chunked SSE |
+| System-tray / background app | ✅ desktop app | ❌ | ✅ `python -m pai.tray` |
+| App integrations (Calendar/Tasks) | limited | ✅ Google apps | ⚠️ reminders + Calendar mirror built-in |
 | Reminders / proactive speech | via apps | ✅ | ✅ spoken aloud, offline |
 | Answer cards (weather/time/widgets) | ✅ | ✅ | ✅ weather · clock · reminder |
 | Reasoning effort selector | ✅ instant/deep | ✅ thinking modes | ✅ instant/deep w/ model escalation |
 | Emotion-adaptive tone (affective) | ✅ | ✅ | ❌ needs better open S2S models |
-| Background/locked-screen continuation | ✅ | ✅ | ⚠️ server persists; tray app planned |
+| Background/locked-screen continuation | ✅ | ✅ hold/resume | ✅ tray app keeps server alive |
 | **Real PC control** (click/type/apps/shell) | ❌ | ❌ | ✅ |
 | Session length | ~limits | 15 min audio (!) | ♾️ unlimited |
 | Fully offline | ❌ | ❌ | ✅ |
@@ -314,10 +316,12 @@ src/pai/
                          hands-free + wake + share wiring, reminders,
                          graceful shutdown
   vad.py                 WebRTC/energy VAD, echo guard, mic listener
-  wakeword.py            openWakeWord + transcript phrase gate
+  wakeword.py            openWakeWord + transcript phrase gate (+ custom models)
   screenshare.py         change-detected continuous frame streamer
-  memory.py              ConversationStore: JSONL, rolling window, summaries
+  webcam.py              OpenCV camera capture (camera-share mode)
+  memory.py              ConversationStore: JSONL, rolling window, LLM summaries
   reminders.py           persistent store, natural-time parser, scheduler
+  gcal.py                optional Google Calendar mirror for reminders
   provider_voicechat.py  Nemotron speech-to-speech (file protocol)
   provider_modular.py    ASR→LLM(+memory/tools)→TTS, local + online
   provider_hybrid.py     VoiceChat + VLM screen description
@@ -371,6 +375,7 @@ else (VAD, wake word, capture, tools, dashboard, reminders) is CPU-native.
 | Modular: connection refused :8081/:9000 | Start those services or switch profile to online |
 | numpy/PIL ImportError (wrong cp build) | `pip install --force-reinstall numpy pillow` in the venv |
 | Wake word never fires | First run downloads ONNX models — check firewall; verify `openWakeWord loaded` in log |
+| Webcam unavailable | `pip install opencv-python-headless`, check no other app holds the camera |
 
 ---
 
