@@ -185,6 +185,12 @@ class ToolExecutor:
             due = datetime.fromtimestamp(item["when"]).strftime("%H:%M")
             self._emit_card("reminder", {"text": p.get("text", cleaned),
                                          "due": due})
+            # optional Google Calendar mirror (never blocks local flow)
+            try:
+                from . import gcal
+                gcal.mirror_event(str(p.get("text", cleaned)), item["when"])
+            except Exception:  # noqa: BLE001
+                pass
             return {"ok": True, "id": item["id"], "due": due}
         if name == "list_reminders":
             items = [{"id": i["id"],

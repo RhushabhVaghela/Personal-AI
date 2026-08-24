@@ -16,3 +16,4 @@ webrtcvad-wheels>=2.0.14
 openwakeword>=0.6.0
 onnxruntime>=1.17
 opencv-python-headless>=4.9
+pystray>=0.8.6

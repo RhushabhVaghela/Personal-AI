@@ -32,6 +32,9 @@ class ModularProvider:
             max_turns=cfg.memory_turns,
             summarize_after=cfg.summarize_after if hasattr(cfg, "summarize_after")
             else cfg.memory_summarize_after)
+        # LLM-backed summaries (graceful fallback to extractive)
+        self.memory.attach_llm_summarizer(
+            lambda msgs: self._chat(msgs))
 
     # -- helpers -----------------------------------------------------------------
 

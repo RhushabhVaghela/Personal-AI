@@ -57,3 +57,6 @@ kill_switch_keys: ctrl+alt+q
 
 # --- ui ---
 dashboard_port: 8765
+
+# --- integrations ---
+google_calendar: false     # mirror reminders to Google Calendar (needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS)

@@ -193,7 +193,8 @@ class AssistantSession:
                 if _WAKE_GATE["gate"] is None:
                     _WAKE_GATE["gate"] = WakeWordGate(
                         phrases=msg.get("phrases") or self.cfg.wake_phrases,
-                        oww_models=getattr(self.cfg, "wake_oww_models", None))
+                        oww_models=getattr(self.cfg, "wake_oww_models", None),
+                        custom_model=getattr(self.cfg, "wake_custom_model", ""))
                 _WAKE_GATE["gate"].activate()   # first turn free, then re-arms
                 await self._toggle_hands_free(True)
                 await self.send("wake_mode", on=True,

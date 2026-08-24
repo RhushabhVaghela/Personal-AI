@@ -106,6 +106,9 @@ class Config:
         "hey assistant", "assistant", "computer"])  # transcript gate
     wake_oww_models: list = field(default_factory=lambda: [
         "hey_jarvis", "alexa"])              # openWakeWord audio models
+    wake_custom_model: str = ""              # path to custom .onnx/.tflite
+                                             # (train yours: openwakeword
+                                             #  training colab / local)
     # memory
     memory_turns: int = 24                   # rolling context window
     memory_summarize_after: int = 40
@@ -118,6 +121,8 @@ class Config:
     reasoning_effort: str = "instant"        # instant | deep
     deep_llm_base_url: str = ""              # empty = same LLM
     deep_llm_model: str = ""                 # e.g. a bigger local model or gpt-4o
+    # optional Google Calendar mirror for reminders
+    google_calendar: bool = False            # needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS
     # autonomy: "confirm" | "auto_safe" | "full"
     autonomy: str = "full"
     kill_switch_keys: str = "ctrl+alt+q"

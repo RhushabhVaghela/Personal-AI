@@ -119,3 +119,31 @@ class ConversationStore:
     def set_summarizer(self, fn) -> None:
         """fn(old_summary, fold_text) -> new_summary (LLM-backed)."""
         self._summarizer = fn
+
+    def attach_llm_summarizer(self, chat_fn) -> None:
+        """Wire an LLM chat function for high-quality summaries.
+
+        chat_fn(messages: list[dict]) -> str
+        """
+        def _summarize(old: str, fold: str) -> str:
+            try:
+                prompt = [
+                    {"role": "system", "content":
+                     "Summarize ongoing voice conversations into compact "
+                     "notes. Keep facts, names, decisions and open items. "
+                     "Merge with any prior summary."},
+                    {"role": "user",
+                     "content": f"Prior summary:\n{old or '(none)'}\n\nNew "
+                                f"exchanges to fold in:\n{fold}\n\nUpdated "
+                                f"summary:"},
+                ]
+                out = chat_fn(prompt).strip()
+                if out:
+                    return out[:2000]
+            except Exception as exc:  # noqa: BLE001
+                log.warning("LLM summarizer failed (%s); extractive fallback",
+                            exc)
+            # extractive fallback
+            lines = [l for l in fold.splitlines() if l.strip()]
+            return ((old + "\n" if old else "") + "\n".join(lines[-20:]))[:2000]
+        self.set_summarizer(_summarize)
