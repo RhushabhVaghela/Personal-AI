@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from . import config, input_control, providers, tools
+from .providers import PROVIDER_CAPS, check_available
 from .vad import get_engine, listen_continuous
 from .wakeword import WakeWordGate
 from .screenshare import ScreenShareStreamer
@@ -48,24 +49,49 @@ async def _get_shared_provider(name: str):
     """Return the shared provider instance, switching cleanly if needed.
 
     Guarantees the OLD model process is fully stopped (RAM/VRAM freed)
-    before the new one loads.
+    before the new one loads. If the new provider fails to start, the
+    previous one is restored so you're never left model-less.
     """
     global _active_provider, _active_name
     async with _provider_lock:
         if _active_provider is not None and _active_name == name \
                 and getattr(_active_provider, "is_running", lambda: True)():
             return _active_provider
-        if _active_provider is not None:
+
+        # pre-flight: don't tear down a working model for one that can't run
+        ok, why = providers.check_available(name)
+        if not ok:
+            raise RuntimeError(f"{name} is not available: {why}")
+
+        prev_name, prev_prov = _active_name, _active_provider
+        if prev_prov is not None:
             log.info("switching provider %s -> %s; stopping old model",
                      _active_name, name)
-            if hasattr(_active_provider, "stop"):
+            if hasattr(prev_prov, "stop"):
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _active_provider.stop)
+                    None, prev_prov.stop)
             _active_provider = None
             _active_name = None
-        prov = providers.get_provider(name)
-        if hasattr(prov, "start"):
-            await asyncio.get_running_loop().run_in_executor(None, prov.start)
+        try:
+            prov = providers.get_provider(name)
+            if hasattr(prov, "start"):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, prov.start)
+        except Exception as exc:
+            # roll back to the previously working provider
+            log.error("switch to %s failed (%s); restoring %s",
+                      name, exc, prev_name)
+            if prev_prov is not None:
+                try:
+                    if hasattr(prev_prov, "start"):
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, prev_prov.start)
+                    _active_provider = prev_prov
+                    _active_name = prev_name
+                except Exception as exc2:  # noqa: BLE001
+                    log.error("restore of %s also failed: %s",
+                              prev_name, exc2)
+            raise
         _active_provider = prov
         _active_name = name
         return prov
@@ -163,11 +189,32 @@ class AssistantSession:
                             provider=_active_name or "none",
                             autonomy=self.cfg.autonomy)
         elif kind == "switch":
-            # switch the shared provider without dropping the connection
+            # switch the shared provider without dropping the connection.
+            # On failure: error + previous provider restored (dropdown
+            # resyncs via the ready message).
             name = msg.get("provider", "voicechat")
+            ok, why = providers.check_available(name)
+            if not ok:
+                await self.send("error",
+                                text=f"⚠ {name} unavailable — staying on "
+                                     f"{_active_name or 'none'}: {why}")
+                if _active_name:
+                    await self.send("ready", provider=_active_name,
+                                    restored=True)
+                return
             await self.send("status", text=f"switching to {name}...")
-            await _get_shared_provider(name)
+            try:
+                await _get_shared_provider(name)
+            except Exception as exc:
+                await self.send(
+                    "error", text=f"{name} failed to start — restored "
+                                  f"{_active_name or 'previous'}: {exc}")
+                if _active_provider is not None:
+                    await self.send("ready", provider=_active_name,
+                                    restored=True)
+                return
             await self.send("ready", provider=name)
+            await self.send("caps", **providers.ui_caps(name))
         elif kind == "audio_chunk":
             data = base64.b64decode(msg.get("data", ""))
             wav = self._to_wav(data)

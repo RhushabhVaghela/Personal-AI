@@ -194,6 +194,8 @@ function connect(){
     switch(m.kind){
       case "ready": $("status").textContent = "ready: "+m.provider;
         syncDropdowns(m.provider);
+        if(m.restored) logMsg("sys", "⚠ switch failed — previous provider restored");
+        applyCaps(m.provider);
         logMsg("sys", "— "+m.provider+" ready —"); break;
       case "status": $("status").textContent = m.text;
         logMsg("sys", m.text); break;
@@ -314,6 +316,24 @@ function showCard(kind, d){
     if(!cardEl.children.length) cardEl.style.display="none"; }, 20000);
 }
 let tUser = 0;
+/* capability gating — server tells us which controls matter per provider */
+const CAP_CONTROLS = ["voice", "ttsengine", "effort"];
+function applyCaps(provider){
+  const caps = {
+    modular:   {voice:true, engine:true,  effort:true},
+    voicechat: {voice:false, engine:false, effort:false}, // native TTS; edge re-voice opt-in via checkbox
+    hybrid:    {voice:false, engine:false, effort:false},
+    qwen_omni: {voice:false, engine:false, effort:false},
+    glm_voice: {voice:false, engine:false, effort:false},
+    moshi:     {voice:false, engine:false, effort:false},
+  }[provider] || {voice:true, engine:true, effort:true};
+  CAP_CONTROLS.forEach(id => {
+    const el = $(id); if(!el) return;
+    el.disabled = !caps[id];
+    el.style.opacity = caps[id] ? "1" : "0.4";
+    el.title = caps[id] ? "" : `not applicable to ${provider}`;
+  });
+}
 function setKill(on){
   $("kill").textContent = "kill-switch: " + (on ? "ENGAGED" : "off");
   $("kill").classList.toggle("on", on);
