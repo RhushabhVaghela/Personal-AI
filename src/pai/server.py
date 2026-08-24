@@ -225,6 +225,21 @@ class AssistantSession:
                 text="🎙 Nemotron re-voicing ON — replies use your selected "
                      "voice" if self.cfg.voicechat_tts_mode == "edge"
                 else "🎙 Nemotron native voice (fastest)")
+        elif kind == "set_tts_engine":
+            # modular TTS engine: edge | omnivoice | zipvoice | vibevoice | openai
+            engine = msg.get("engine", "")
+            valid = {"edge", "omnivoice", "zipvoice", "vibevoice",
+                     "openai", "browser"}
+            if engine in valid:
+                self.cfg.tts_backend = engine
+                self.cfg.tts_engine = engine
+                await self.send(
+                    "status",
+                    text=f"🔊 TTS engine: {engine}" +
+                         (" (offline)" if engine in
+                          ("omnivoice", "zipvoice", "vibevoice") else ""))
+            else:
+                await self.send("error", text=f"unknown TTS engine {engine!r}")
         elif kind == "set_effort":
             # GPT-Live reasoning effort: instant | deep (escalates model)
             effort = msg.get("effort", "instant")
