@@ -376,8 +376,33 @@ else (VAD, wake word, capture, tools, dashboard, reminders) is CPU-native.
 - [x] ~~LLM-backed conversation summarizer hook-up~~ — wired with extractive fallback
 - [x] ~~System-tray app packaging~~ — `python -m pai.tray`
 - [x] ~~Webcam input alongside screen share~~ — camera mode via OpenCV
+- [x] ~~Reasoning-tag stream sanitation~~ — dual-channel FSM (`stream_sanitizer.py`); <think> leakage can't reach UI/TTS/tool parser; reasoning shown in a collapsible panel
 - [ ] Affective tone (emotion-adaptive prosody) — awaiting open S2S models
 - [ ] Multi-user speaker identification
+
+### Architecture notes: hardening against local-runtime failure modes
+
+Three failure modes documented in local-agent deployments, and how this
+project addresses them:
+
+1. **Reasoning-tag leakage** (Qwen3/DeepSeek/GLM emit `<think>…</think>`;
+   tags split across SSE chunks defeat string filters) → solved by the
+   dual-channel FSM in `stream_sanitizer.py`: tag-open detection holds a
+   sliding buffer, routes reasoning to a separate UI channel, guarantees
+   clean text to the tool-call parser and TTS queue. For logit-level
+   certainty, `deep_brain.chat(grammar=...)` accepts GBNF grammars that
+   make malformed tool-call JSON structurally impossible.
+2. **Context-cliff / memory saturation** → rolling window
+   (`memory_turns`) + LLM summarization keeps prompts small; the Deep
+   Brain runs llama.cpp with FlashAttention and q8_0 KV-cache quantization
+   (linear KV scaling), and auto-unloads after idle so VRAM returns to the
+   voice model. For multi-session persistence at scale, point
+   `deep_llm_base_url`/`llm_base_url` at any server and pair it with an
+   external memory layer (Mem0-style fact extraction is compatible with
+   our JSONL session files).
+3. **Quantized-model decoding instability** (broken JSON in tool calls) →
+   mitigated two ways: sanitizer cleans the text channel before parsing,
+   and GBNF grammar constraints are available for llama.cpp-served brains.
 
 ---
 
