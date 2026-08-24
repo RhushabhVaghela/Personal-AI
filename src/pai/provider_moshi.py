@@ -121,43 +121,7 @@ class MoshiProvider:
         terminal flows still work uniformly.
         """
         try:
-            import asyncio
-            import websockets
-            import soundfile as sf
-            import numpy as np
-
-            async def _run():
-                data, sr = sf.read(str(wav_path), dtype="int16")
-                assert sr == 16000, f"need 16k, got {sr}"
-                pcm = data.tobytes()
-                out_chunks = bytearray()
-                async with websockets.connect(self.WS_URL_DEFAULT) as ws:
-                    # stream input in 1920-frame slices (1920 samples=120ms)
-                    step = 1920 * 2
-                    for i in range(0, len(pcm), step):
-                        await ws.send(pcm[i:i+step])
-                        await asyncio.sleep(0.01)
-                    # collect reply until ~1s of silence
-                    last = time.time()
-                    while time.time() - last < 1.5:
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), 0.5)
-                            if isinstance(msg, (bytes, bytearray)):
-                                out_chunks.extend(msg)
-                                last = time.time()
-                            else:
-                                log.debug("moshi text: %s", str(msg)[:100])
-                        except asyncio.TimeoutError:
-                            continue
-                audio = np.frombuffer(bytes(out_chunks), dtype="int16")
-                if len(audio) == 0:
-                    return None, ""
-                out = Path(tempfile_dir()) / \
-                    f"pai_moshi_{int(time.time()*1000)}.wav"
-                sf.write(out, audio, 16000)
-                return out, ""
-
-            wav, txt = asyncio.get_event_loop().run_until_complete(_run())
+            wav, txt = _moshi_exchange_sync(wav_path)
             if wav is None:
                 return {"text": "(moshi silent)", "audio": None,
                         "tool_calls": []}
@@ -166,6 +130,72 @@ class MoshiProvider:
             log.error("moshi turn failed: %s", exc)
             return {"text": f"(moshi error: {exc})", "audio": None,
                     "tool_calls": []}
+
+
+def _moshi_exchange_sync(wav_path):
+    """Run one utterance through moshi-server's WebSocket.
+
+    Creates its own event loop on a fresh thread because this is called
+    from worker threads (asyncio.run would collide with any running loop).
+    """
+    import asyncio
+    import websockets
+    import soundfile as sf
+    import numpy as np
+
+    result = {"wav": None, "text": "", "error": None}
+
+    async def _run():
+        data, sr = sf.read(str(wav_path), dtype="int16")
+        if sr != 16000:
+            raise RuntimeError(f"need 16 kHz audio, got {sr}")
+        pcm = data.tobytes()
+        out_chunks = bytearray()
+        # rust backend uses self-signed https by default; try ws first
+        url = MoshiProvider.WS_URL_DEFAULT.replace("wss://", "ws://")
+        async with websockets.connect(url, max_size=None) as ws:
+            step = 1920 * 2                      # 120 ms of PCM16
+            for i in range(0, len(pcm), step):
+                await ws.send(pcm[i:i + step])
+                await asyncio.sleep(0.01)
+            last = time.time()
+            while time.time() - last < 1.5:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), 0.5)
+                    if isinstance(msg, (bytes, bytearray)):
+                        out_chunks.extend(msg)
+                        last = time.time()
+                    else:
+                        log.debug("moshi text: %s", str(msg)[:100])
+                except asyncio.TimeoutError:
+                    continue
+
+        audio = np.frombuffer(bytes(out_chunks), dtype="int16")
+        if len(audio) == 0:
+            result["wav"], result["text"] = None, ""
+            return
+        out = Path(tempfile_dir()) / f"pai_moshi_{int(time.time()*1000)}.wav"
+        sf.write(out, audio, 16000)
+        result["wav"], result["text"] = out, ""
+
+    def _target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run())
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_target)
+    t.start()
+    t.join(timeout=120)
+    if t.is_alive():
+        raise RuntimeError("moshi exchange timed out")
+    if result["error"]:
+        raise result["error"]
+    return result["wav"], result["text"]
 
 
 def tempfile_dir() -> str:

@@ -22,7 +22,7 @@ log = logging.getLogger("pai.reminders")
 
 class ReminderStore:
     def __init__(self, path: Path | None = None):
-        self.path = path or Path(__file__).resolve().parents[3] / "reminders.json"
+        self.path = path or Path(__file__).resolve().parents[2] / "reminders.json"
         self.items: list[dict] = []
         self._lock = threading.Lock()
         self._load()

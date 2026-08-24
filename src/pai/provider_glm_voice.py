@@ -13,16 +13,18 @@ VRAM BUDGET (16 GB, int4):
   ─────────────────────────────────
   Total                     ~10-12 GB  ✓
 
-Architecture: three processes
-  model_server.py  (--dtype int4, port 10000)
-  tokenizer server (whisper VQ, port 10001)
-  decoder          (cosyvoice, port 10002? per repo layout)
-We talk HTTP to those and never load torch in OUR venv.
+Architecture: GLM-4-Voice's own web demo stack runs three processes
+(model_server / tokenizer server / speech decoder). We launch them from
+its dedicated conda env and talk HTTP — no torch in OUR venv.
 
 Setup:
   git clone https://github.com/THUDM/GLM-4-Voice  D:/Agents-and-other-repos/GLM-4-Voice
   cd there; conda create -n glm python=3.10; pip install -r requirements.txt
-  # int4 weights auto-download from cydxg/glm-4-voice-9b-int4 (~7 GB)
+  # int4 weights auto-download (~7 GB)
+
+NOTE: this provider expects the repo's servers to expose /health, /tokenize,
+/chat and /decode endpoints. If your checkout's demo layout differs, run its
+web demo once and adjust the three URLs + paths below to match.
 """
 from __future__ import annotations
 
@@ -70,16 +72,14 @@ class GlmVoiceProvider:
                 "requirements.txt")
         if self._healthy():
             return True
-        py = Path(self.repo) / "env" / "python.exe"  # conda layout guess
-        if not py.exists():
-            py = "python"   # fall back to PATH (user activates env)
+        py = shutil.which("python")   # activate the glm conda env first
         cmds = [
-            [str(py), "model_server.py", "--host", "127.0.0.1",
+            [py, "model_server.py", "--host", "127.0.0.1",
              "--model-path", "THUDM/glm-4-voice-9b", "--port", "10000",
              "--dtype", self.dtype, "--device", "cuda:0"],
-            [str(py), "tokenizer_server.py", "--host", "127.0.0.1",
+            [py, "tokenizer_server.py", "--host", "127.0.0.1",
              "--port", "10001"],
-            [str(py), "decoder_server.py", "--host", "127.0.0.1",
+            [py, "decoder_server.py", "--host", "127.0.0.1",
              "--port", "10002"],
         ]
         for cmd in cmds:
@@ -89,6 +89,8 @@ class GlmVoiceProvider:
                 stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
         deadline = time.time() + 600   # int4 loads slowly first time
         while time.time() < deadline:
+            if all(p.poll() is not None for p in self.proc):
+                raise RuntimeError("a glm-voice server exited during startup")
             if self._healthy():
                 log.info("glm-voice ready")
                 return True
@@ -102,16 +104,9 @@ class GlmVoiceProvider:
             except Exception:  # noqa: BLE001
                 pass
         self.proc.clear()
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "python.exe"],
-                           capture_output=True)  # too broad! see note below
-        except Exception:  # noqa: BLE001
-            pass
-        # NOTE: we deliberately do NOT taskkill python.exe globally — that
-        # would kill this dashboard too. Child kills above suffice.
 
     def is_running(self) -> bool:
-        return bool(self.proc) and all(p.poll() is None for p in self.proc)
+        return bool(self.proc) and any(p.poll() is None for p in self.proc)
 
     def _healthy(self) -> bool:
         try:
@@ -125,33 +120,41 @@ class GlmVoiceProvider:
     def turn(self, wav_path: Path, executor: pai_tools.ToolExecutor,
              image_path: Path | None = None,
              max_tool_rounds: int = 3) -> dict:
-        b64 = None
+        import base64
         with open(wav_path, "rb") as f:
-            import base64
             b64 = base64.b64encode(f.read()).decode()
 
         # 1. tokenize user speech
         tok = self.session.post(f"{self.TOKENIZER_SERVER}/tokenize",
                                 json={"audio": b64}, timeout=60).json()
-        # 2. ask the LLM
-        chat = self.session.post(
-            f"{self.MODEL_SERVER}/chat",
-            json={"messages": [
-                {"role": "system",
-                 "content": self._system_prompt()},
-                {"role": "assistant",
-                 "content": "<|begin_of_audio|>" + "".join(tok["tokens"])
-                            + "<|end_of_audio|>"},
-            ]},
-            timeout=180).json()
-        reply_text = chat.get("response", "").strip()
-        reply_tokens = chat.get("speech_tokens")
+        tokens = tok.get("tokens") or []
 
-        calls = pai_tools.parse_tool_calls(reply_text)
-        if calls:
+        # 2. ask the LLM (tool loop)
+        reply_text = ""
+        reply_tokens = None
+        for _round in range(max_tool_rounds + 1):
+            chat = self.session.post(
+                f"{self.MODEL_SERVER}/chat",
+                json={"messages": [
+                    {"role": "system",
+                     "content": self._system_prompt()},
+                    {"role": "assistant",
+                     "content": "<|begin_of_audio|>" + "".join(tokens)
+                                + "<|end_of_audio|>"},
+                ]},
+                timeout=180).json()
+            reply_text = (chat.get("response") or "").strip()
+            reply_tokens = chat.get("speech_tokens")
+
+            calls = pai_tools.parse_tool_calls(reply_text)
+            if not calls:
+                break
             results = [executor.execute(n, p) for n, p in calls]
-            return {"text": "(tool result spoken next turn)",
-                    "audio": None, "tool_results": results}
+            tokens = []   # next round is text-only context
+            reply_text = (
+                "Tool results: "
+                + json.dumps(results, default=str)[:1500]
+                + "\nNow give the final spoken answer.")
 
         if not reply_tokens:
             return {"text": reply_text or "(no reply)", "audio": None,
@@ -168,10 +171,11 @@ class GlmVoiceProvider:
         return {"text": reply_text, "audio": str(out), "tool_calls": []}
 
     def _system_prompt(self) -> str:
-        import json
         voice_hint = ""
-        if self.cfg.tts_speed and self.cfg.tts_speed != 1.0:
-            voice_hint += f" Speak at {'slower' if self.cfg.tts_speed < 1 else 'faster'} pace."
+        speed = getattr(self.cfg, "tts_speed", 1.0)
+        if speed and speed != 1.0:
+            voice_hint += (" Speak at a slower pace." if speed < 1
+                           else " Speak at a faster pace.")
         return ("You are a helpful desktop assistant. Answer in 1-3 short "
                 "spoken sentences." + voice_hint)
 
@@ -179,3 +183,6 @@ class GlmVoiceProvider:
 def tempfile_dir() -> str:
     import tempfile
     return tempfile.gettempdir()
+
+
+import shutil  # noqa: E402  (used by start())

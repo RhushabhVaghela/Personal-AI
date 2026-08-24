@@ -23,7 +23,7 @@ class ConversationStore:
                  max_turns: int = 24,
                  summarize_after: int = 40):
         self.root = Path(root) if root else (
-            Path(__file__).resolve().parents[3] / "sessions")
+            Path(__file__).resolve().parents[2] / "sessions")
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / f"{session}.jsonl"
         self.max_turns = max_turns
@@ -94,15 +94,14 @@ class ConversationStore:
     def _maybe_summarize(self) -> None:
         """Fold old turns into the running summary.
 
-        Uses an extractive fallback by default (no LLM needed); providers can
-        override via `set_summarizer` to use their LLM.
+        Uses the LLM summarizer when attached (attach_llm_summarizer),
+        else an extractive fallback (no LLM needed).
         """
         cut = len(self.turns) - self.max_turns
         if cut <= 0:
             return
         old, self.turns = self.turns[:cut], self.turns[cut:]
 
-        # extractive fallback: keep first sentence of each old turn
         lines = []
         for t in old:
             s = t["text"].strip().replace("\n", " ")
@@ -110,11 +109,25 @@ class ConversationStore:
                 lines.append(("U: " if t["role"] == "user" else "A: ")
                              + s[:120])
         fold = "\n".join(lines[-20:])
-        self.summary = ((self.summary + "\n" if self.summary else "")
-                        + fold)[:2000]
+
+        new_summary = ""
+        summarizer = getattr(self, "_summarizer", None)
+        if summarizer is not None:
+            try:
+                new_summary = str(summarizer(self.summary, fold) or "")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("summarizer raised (%s); extractive fallback", exc)
+            if not new_summary:
+                new_summary = ((self.summary + "\n" if self.summary else "")
+                               + fold)[:2000]
+        else:
+            new_summary = ((self.summary + "\n" if self.summary else "")
+                           + fold)[:2000]
+
+        self.summary = new_summary
         self._append({"type": "summary", "text": self.summary})
-        log.info("memory: summarized %d turns (history=%d)",
-                 cut, len(self.turns))
+        log.info("memory: summarized %d turns (history=%d, llm=%s)",
+                 cut, len(self.turns), bool(summarizer))
 
     def set_summarizer(self, fn) -> None:
         """fn(old_summary, fold_text) -> new_summary (LLM-backed)."""

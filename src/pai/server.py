@@ -157,6 +157,7 @@ class AssistantSession:
             await self.send("error", text=f"{kind} failed: {exc}")
 
     async def _handle(self, msg: dict, kind: str) -> None:
+        global _active_provider, _active_name
         if kind == "config":
             await self.send("config_ok",
                             provider=_active_name or "none",
@@ -235,6 +236,7 @@ class AssistantSession:
                     from .deep_brain import get_deep_brain
                     db = get_deep_brain()
                     if getattr(self.cfg, "deep_pause_s2s", True) and \
+                            _active_provider is not None and \
                             hasattr(_active_provider, "stop"):
                         await asyncio.get_event_loop().run_in_executor(
                             None, _active_provider.stop)
@@ -243,9 +245,13 @@ class AssistantSession:
                             text="🧠 pausing voice model to make room…")
                     await asyncio.get_event_loop().run_in_executor(
                         None, db.ensure_up)
-                    deep_info = " — Qwen3-30B-A3B loaded"
-                    cfg.deep_llm_base_url = f"http://127.0.0.1:{db.port}/v1"
-                    cfg.deep_llm_model = "deep-brain"
+                    deep_info = f" — {db.hf_repo.split(':')[0].split('/')[-1]} loaded"
+                    self.cfg.deep_llm_base_url = \
+                        f"http://127.0.0.1:{db.port}/v1"
+                    self.cfg.deep_llm_model = "deep-brain"
+                    # the paused S2S model will restart on next use
+                    _active_provider = None
+                    _active_name = None
                 except Exception as exc:  # noqa: BLE001
                     log.error("deep brain failed: %s", exc)
                     deep_info = f" (brain load failed: {exc})"
@@ -544,9 +550,9 @@ class AssistantSession:
                 # optional re-voicing: swap the built-in Nemotron voice for
                 # the user-selected edge-tts voice + speed
                 if (getattr(self.cfg, "voicechat_tts_mode", "native") == "edge"
-                        and text and text not in ("(voice reply)", "")):
-                    await self.send("status",
-                                    text="🎙 applying selected voice...")
+                        and text and text != "(voice reply)"):
+                    await self.send(
+                        "status", text="🎙 applying selected voice...")
                     try:
                         from .provider_modular import ModularProvider
                         mp = ModularProvider()
@@ -557,7 +563,8 @@ class AssistantSession:
                                  self.cfg.tts_voice, self.cfg.tts_speed)
                     except Exception as exc:  # noqa: BLE001
                         log.warning(
-                            "re-voice failed (%s) — keeping native voice", exc)
+                            "re-voice failed (%s) — keeping native voice",
+                            exc)
                 await self._send_audio(Path(audio))
 
     _ack_cache: dict = {}
@@ -603,6 +610,8 @@ class AssistantSession:
         if provider.name == "modular":
             loop = asyncio.get_running_loop()
             await self.send("transcript", text=text)
+            # GPT-Live-style backchannel while the model thinks
+            asyncio.ensure_future(self._play_backchannel())
             await self.send("status", text="thinking...")
             result = await loop.run_in_executor(
                 None, provider.think, text, self.executor)
