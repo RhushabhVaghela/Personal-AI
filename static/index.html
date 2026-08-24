@@ -204,6 +204,8 @@ function connect(){
       case "reply": {
         logMsg("bot", m.text);
         if(m.text && m.text !== "(voice reply)") showCaption(m.text);
+        const tbR2 = document.getElementById("thinkbox");
+        if(tbR2) tbR2.open = false;   // collapse reasoning when answer lands
         if(tUser) $("latency").textContent =
           ((performance.now()-tUser)/1000).toFixed(1)+"s";
         break;
@@ -243,6 +245,25 @@ function connect(){
       case "session": renderSession(m); break;
       case "card": showCard(m.card, m); break;
       case "vad": $("status").textContent = "listening…"; break;
+      case "thinking":
+        /* collapsed reasoning channel (Qwen3/DeepSeek/GLM <think> streams) */
+        if(!$("thinkbox")){
+          const tb = document.createElement("details");
+          tb.id = "thinkbox";
+          tb.style.cssText = "align-self:flex-start;max-width:80%;font-size:11px;"+
+            "color:var(--muted);border:1px dashed var(--border);border-radius:8px;padding:6px 10px";
+          tb.innerHTML = "<summary>🧠 reasoning</summary><div id='thinktext' "+
+            "style='white-space:pre-wrap;margin-top:4px'></div>";
+          $("log").appendChild(tb);
+          $("log").scrollTop = 1e9;
+        }
+        document.getElementById("thinktext").textContent += m.delta;
+        break;
+      case "reply":
+        /* final answer arrived → collapse the reasoning panel */
+        const tbR = document.getElementById("thinkbox");
+        if(tbR) tbR.open = false;
+        break;
     }
   };
   ws.onclose = () => { $("status").textContent = "disconnected";

@@ -487,21 +487,31 @@ class AssistantSession:
             await self.send("transcript", text=transcript)
             # GPT-Live-style backchannel while the model thinks
             loop.run_in_executor(None, self._play_backchannel)
-            # streaming path: sentence-chunked TTS as the LLM generates
+            # streaming path: sentence-chunked TTS as the LLM generates.
+            # A StreamSanitizer FSM strips reasoning tags (<think>…) that
+            # split across SSE chunks — they never reach the UI or TTS.
             await self.send("status", text="thinking...")
             t0 = time.time()
             messages = provider._build_messages(transcript, self.executor)
             got_tool_call = False
 
+            def on_thinking(t):
+                if _MAIN_LOOP and _MAIN_LOOP.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.send("thinking", delta=t), _MAIN_LOOP)
+
+            from .stream_sanitizer import sanitize_stream
+            raw = (piece for piece in provider._chat_stream(
+                messages, deep=self.cfg.reasoning_effort == "deep"))
+
             def gen():
                 nonlocal got_tool_call
-                for piece in provider._chat_stream(
-                        messages, deep=self.cfg.reasoning_effort == "deep"):
-                    if not got_tool_call and piece.lstrip()[:1] in ("{", "`"):
+                for clean_piece in sanitize_stream(raw, on_thinking=on_thinking):
+                    s = clean_piece.lstrip()
+                    if not got_tool_call and s[:1] in ("{", "`"):
                         got_tool_call = True   # tool-call reply — abort stream
                         return
-                    if not got_tool_call:
-                        yield piece
+                    yield clean_piece
 
             def on_sentence(sentence, audio_path):
                 if audio_path and _MAIN_LOOP and _MAIN_LOOP.is_running():

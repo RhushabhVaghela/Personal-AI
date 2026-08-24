@@ -106,11 +106,15 @@ class ModularProvider:
 
         for _ in range(max_rounds):
             reply = self._chat(messages)
-            calls = pai_tools.parse_tool_calls(reply)
+            # strip reasoning tags that quantized models leak into the
+            # text channel (would otherwise break JSON tool parsing)
+            from .stream_sanitizer import sanitize_full
+            clean_reply = sanitize_full(reply)
+            calls = pai_tools.parse_tool_calls(clean_reply)
             if not calls:
-                self.memory.add("assistant", reply)
-                return {"text": reply, "tool_calls": []}
-            messages.append({"role": "assistant", "content": reply})
+                self.memory.add("assistant", clean_reply)
+                return {"text": clean_reply, "tool_calls": []}
+            messages.append({"role": "assistant", "content": clean_reply})
             results = []
             for name, params in calls:
                 entry = executor.execute(name, params)

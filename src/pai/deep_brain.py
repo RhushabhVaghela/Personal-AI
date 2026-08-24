@@ -81,6 +81,9 @@ class DeepBrain:
                 "-ngl", str(self.gpu_layers),
                 "-c", "16384",              # generous ctx, MoE KV is cheap
                 "--jinja",                   # enable chat template
+                "--flash-attn", "on",        # linear KV scaling (vs quadratic)
+                "-ctk", "q8_0", "-ctv", "q8_0",   # quantized KV cache
+                "--no-context-shift",
             ]
             log.info("deep brain starting: %s", " ".join(cmd))
             log.info("(first run downloads the model — %s)", self.hf_repo)
@@ -136,14 +139,23 @@ class DeepBrain:
 
     # -- inference ---------------------------------------------------------------
 
-    def chat(self, messages: list[dict], max_tokens: int = 700) -> str:
-        """Blocking chat completion against the deep brain."""
+    def chat(self, messages: list[dict], max_tokens: int = 700,
+             grammar: str | None = None) -> str:
+        """Blocking chat completion against the deep brain.
+
+        grammar: optional GBNF grammar string — logit-level constraint that
+        makes invalid JSON/tool-call tokens impossible (quantized models
+        flatten probability distributions; this restores determinism).
+        """
         self.ensure_up()
         t0 = time.time()
+        payload: dict = {"messages": messages, "temperature": 0.4,
+                         "max_tokens": max_tokens}
+        if grammar:
+            payload["grammar"] = grammar
         r = requests.post(
             f"http://127.0.0.1:{self.port}/v1/chat/completions",
-            json={"messages": messages, "temperature": 0.4,
-                  "max_tokens": max_tokens},
+            json=payload,
             timeout=900,
         )
         r.raise_for_status()
