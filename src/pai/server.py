@@ -189,20 +189,23 @@ class AssistantSession:
             # Gemini 'proactive audio' parity: hands-free stays armed until
             # the wake phrase is heard (or OWW audio detection fires)
             on = bool(msg.get("on"))
-            if on:
-                if _WAKE_GATE["gate"] is None:
-                    _WAKE_GATE["gate"] = WakeWordGate(
-                        phrases=msg.get("phrases") or self.cfg.wake_phrases,
-                        oww_models=getattr(self.cfg, "wake_oww_models", None),
-                        custom_model=getattr(self.cfg, "wake_custom_model", ""))
-                _WAKE_GATE["gate"].activate()   # first turn free, then re-arms
-                await self._toggle_hands_free(True)
-                await self.send("wake_mode", on=True,
-                                oww=WakeWordGate.available())
-            else:
+            gate_on = _WAKE_GATE["gate"] is not None and on
+            if on and not gate_on:
+                _WAKE_GATE["gate"] = WakeWordGate(
+                    phrases=msg.get("phrases") or self.cfg.wake_phrases,
+                    oww_models=getattr(self.cfg, "wake_oww_models", None),
+                    custom_model=getattr(self.cfg, "wake_custom_model", ""))
+            elif not on:
                 if _WAKE_GATE["gate"]:
                     _WAKE_GATE["gate"].deactivate()
+                _WAKE_GATE["gate"] = None
                 await self.send("wake_mode", on=False)
+                await self._toggle_hands_free(False)
+                return
+            _WAKE_GATE["gate"].activate()   # first turn free, then re-arms
+            await self._toggle_hands_free(True)
+            await self.send("wake_mode", on=True,
+                            oww=WakeWordGate.available())
         elif kind == "set_voice":
             # ChatGPT-style voice + speed selection
             voice = msg.get("voice")
@@ -324,7 +327,12 @@ class AssistantSession:
 
     async def _toggle_hands_free(self, on: bool) -> None:
         hf = _HANDSFREE
-        if on and hf["thread"] is None:
+        if on and hf["thread"] is not None:
+            # already on — re-ack so the button doesn't feel dead
+            await self.send("hands_free", on=True,
+                            engine=type(hf["engine"]).__name__)
+            return
+        if on:
             cfg = self.cfg
             engine = get_engine(
                 prefer_webrtc=cfg.vad_engine in ("auto", "webrtc"),
@@ -383,7 +391,11 @@ class AssistantSession:
                             engine=type(engine).__name__)
             await self.send("status",
                             text="👂 hands-free — just start talking")
-        elif not on and hf["thread"] is not None:
+        elif not on:
+            if hf["thread"] is None:
+                # already off — re-ack so the button state stays in sync
+                await self.send("hands_free", on=False)
+                return
             hf["stop"].set()
             hf["thread"].join(timeout=3)
             hf.update(thread=None, stop=None, engine=None, session=None)

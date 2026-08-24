@@ -120,7 +120,7 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let ws = null, recorder = null, chunks = [];
+let ws = null, recorder = null, chunks = [], hfOn = false;
 /* ---- sequential audio queue: replies never overlap, like ChatGPT voice */
 const audioQ = [];
 let speaking = false;
@@ -173,10 +173,16 @@ function connect(){
     $("status").textContent = "loading";
     ws.send(JSON.stringify({kind:"hello", provider:$("provider").value}));
   };
+  // resync dropdowns to the SERVER's actual state on every ready message
+  function syncDropdowns(current){
+    if(current && $("provider").value !== current)
+      $("provider").value = current;
+  }
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     switch(m.kind){
       case "ready": $("status").textContent = "ready: "+m.provider;
+        syncDropdowns(m.provider);
         logMsg("sys", "— "+m.provider+" ready —"); break;
       case "status": $("status").textContent = m.text;
         logMsg("sys", m.text); break;
@@ -198,17 +204,23 @@ function connect(){
       case "kill_state": setKill(m.engaged); break;
       case "tool": addToolLine(m.text); break;
       case "hands_free":
+        hfOn = m.on;
         $("hf").style.display = m.on ? "" : "none";
         $("hfbtn").classList.toggle("live", m.on);
         $("hfbtn").textContent = m.on ? "👂 Listening…" : "👂 Hands-free";
+        if(!m.on){ wakeOn = false;   // hands-free off ⇒ wake disarms
+          $("wakebtn").classList.remove("live");
+          $("wakebtn").textContent = "📣 Wake word"; }
         break;
       case "wake_mode":
+        wakeOn = m.on;
         $("wakebtn").classList.toggle("live", m.on);
         $("wakebtn").textContent = m.on ? "📣 Armed" : "📣 Wake word";
         logMsg("sys", m.on ? "📣 wake-word armed — say \"hey assistant…\""
                            : "📣 wake word off");
         break;
       case "share_screen":
+        shareOn = m.on;
         $("sharebtn").classList.toggle("live", m.on);
         $("sharebtn").textContent = m.on ? "🖥 Sharing…" : "🖥 Share screen";
         break;
@@ -288,10 +300,22 @@ async function startRec(){
   if(recorder && recorder.state === "recording") return;
   try{
     const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    // wait for the first real audio data before opening the recorder,
+    // so ultra-short clicks never produce empty/corrupt webm chunks
     recorder = new MediaRecorder(stream);
     chunks = [];
-    recorder.ondataavailable = e => chunks.push(e.data);
+    let gotData = false;
+    recorder.ondataavailable = e => {
+      if(e.data && e.data.size > 0){ chunks.push(e.data); gotData = true; }
+    };
     recorder.onstop = () => {
+      $("mic").classList.remove("rec"); $("mic").textContent = "🎙 Hold";
+      if(!gotData || blobsSize() < 2000){
+        logMsg("sys", "🎙 tap ignored (too short) — hold to speak");
+        $("status").textContent = "ready";
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
       $("status").textContent = "sending audio...";
       logMsg("sys", "🎙 sent (" + (blobsSize()/1024).toFixed(0) + " KB)");
       const blob = new Blob(chunks, {type: recorder.mimeType});
@@ -320,10 +344,19 @@ $("mic").addEventListener("pointerleave", stopRec);
 $("mic").style.userSelect = "none";
 $("mic").style.touchAction = "none";
 $("hfbtn").onclick = () => ws.send(JSON.stringify(
-  {kind:"hands_free", on:$("hf").style.display === "none"}));
-$("wakebtn").onclick = () => ws.send(JSON.stringify({kind:"wake_mode", on:true}));
-$("sharebtn").onclick = () => ws.send(JSON.stringify(
-  {kind:"share_screen", on:!$("sharebtn").classList.contains("live")}));
+  {kind:"hands_free", on:!hfOn}));
+let wakeOn = false;
+$("wakebtn").onclick = () => {
+  wakeOn = !wakeOn;
+  $("wakebtn").classList.toggle("live", wakeOn);   // instant feedback
+  ws.send(JSON.stringify({kind:"wake_mode", on:wakeOn}));
+};
+let shareOn = false;
+$("sharebtn").onclick = () => {
+  shareOn = !shareOn;
+  $("sharebtn").classList.toggle("live", shareOn);
+  ws.send(JSON.stringify({kind:"share_screen", on:shareOn}));
+};
 $("voice").onchange = () => ws.send(JSON.stringify(
   {kind:"set_voice", voice:$("voice").value}));
 let speedTimer = null;
