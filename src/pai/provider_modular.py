@@ -27,6 +27,7 @@ class ModularProvider:
         cfg = config.get_config()
         self.cfg = cfg
         self.profile = cfg.profile
+        self.session = requests.Session()
         self.memory = ConversationStore(
             session=cfg.session_name,
             max_turns=cfg.memory_turns,
@@ -48,6 +49,21 @@ class ModularProvider:
     # -- ASR -------------------------------------------------------------------
 
     def transcribe(self, wav_path: Path) -> str:
+        # optional VibeVoice-ASR-BitNet (realtime ASR on CPU via llama.cpp)
+        vv_url = getattr(self.cfg, "vibevoice_asr_url", "")
+        if vv_url:
+            try:
+                with open(wav_path, "rb") as f:
+                    r = self.session.post(
+                        f"{vv_url}/v1/audio/transcriptions",
+                        files={"file": (wav_path.name, f, "audio/wav")},
+                        timeout=60)
+                if r.ok:
+                    text = (r.json().get("text") or "").strip()
+                    log.info("asr[vibevoice-bitnet]: %r", text[:80])
+                    return text
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vibevoice ASR failed (%s) — falling back", exc)
         log.info("asr[%s]: posting %s (%d bytes)",
                  self.profile, wav_path.name, wav_path.stat().st_size)
         t0 = time.time()
@@ -268,7 +284,13 @@ class ModularProvider:
         if backend == "browser":
             raise BrowserTTSSignal(
                 "browser TTS selected — client renders speech itself")
-        # default: local OmniVoice server
+        if backend in ("omnivoice", "zipvoice", "vibevoice"):
+            # local neural engines (tts_engines.py) — offline, tiny VRAM
+            from . import tts_engines
+            return tts_engines.synthesize(
+                text, out_path.with_suffix(".wav"), engine=backend,
+                ref_audio=(self.cfg.tts_clone_ref or None))
+        # default: local OmniVoice HTTP server (your dubbing stack)
         r = requests.post(
             config.OMNIVOICE_BASE_URL + config.OMNIVOICE_TTS_ENDPOINT,
             json={"model": "omnivoice", "input": text,

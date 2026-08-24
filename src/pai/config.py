@@ -125,6 +125,12 @@ class Config:
     reasoning_effort: str = "instant"        # instant | deep
     deep_llm_base_url: str = ""              # empty = same LLM
     deep_llm_model: str = ""                 # e.g. a bigger local model or gpt-4o
+    # --- Deep Brain: on-demand 30B-class intelligence (MoE, lazy-loaded) ---
+    deep_model_hf: str = "unsloth/Qwen3-30B-A3B-GGUF:UD-Q4_K_XL"
+    deep_llm_port: int = 8082
+    deep_gpu_layers: int = 28                # attention on GPU, experts in RAM
+    deep_idle_unload_s: int = 300            # auto-unload after idle
+    deep_pause_s2s: bool = True              # free VRAM by pausing voice model
     # optional Google Calendar mirror for reminders
     google_calendar: bool = False            # needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS
     # --- extra S2S providers (all fit 16 GB VRAM with the right quant) ---
@@ -136,6 +142,15 @@ class Config:
     moshi_backend: str = "rust"              # rust | wsl
     moshi_repo: str = r"D:\Agents-and-other-repos\moshi"
     moshi_variant: str = "moshika-vis-q8"    # 8.83 GB — see provider docstring
+    # --- next-gen pipeline components (modular provider backends) ---
+    # ASR: microsoft/VibeVoice-ASR-BitNet — realtime ASR on CPU ONLY
+    # (RTF 0.77 @ 3 threads), served by microsoft/VibeASR.cpp (llama.cpp fam)
+    vibevoice_asr_url: str = ""              # e.g. http://127.0.0.1:8090
+    # TTS: k2-fsa/OmniVoice — 0.6B offline neural TTS (600+ langs,
+    # RTF 0.025, voice cloning/design), ~1.2 GB VRAM fp16
+    omnivoice_local_model: str = "k2-fsa/OmniVoice"
+    tts_clone_ref: str = ""                  # wav of YOUR voice → cloned replies
+    tts_engine: str = "edge"                 # edge | omnivoice | zipvoice | vibevoice | openai | browser
     # autonomy: "confirm" | "auto_safe" | "full"
     autonomy: str = "full"
     kill_switch_keys: str = "ctrl+alt+q"

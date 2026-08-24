@@ -228,13 +228,34 @@ class AssistantSession:
             # GPT-Live reasoning effort: instant | deep (escalates model)
             effort = msg.get("effort", "instant")
             self.cfg.reasoning_effort = effort
+            deep_info = ""
+            if effort == "deep":
+                # spin up the on-demand 30B-class brain (lazy, auto-unloads)
+                try:
+                    from .deep_brain import get_deep_brain
+                    db = get_deep_brain()
+                    if getattr(self.cfg, "deep_pause_s2s", True) and \
+                            hasattr(_active_provider, "stop"):
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, _active_provider.stop)
+                        await self.send(
+                            "status",
+                            text="🧠 pausing voice model to make room…")
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, db.ensure_up)
+                    deep_info = " — Qwen3-30B-A3B loaded"
+                    cfg.deep_llm_base_url = f"http://127.0.0.1:{db.port}/v1"
+                    cfg.deep_llm_model = "deep-brain"
+                except Exception as exc:  # noqa: BLE001
+                    log.error("deep brain failed: %s", exc)
+                    deep_info = f" (brain load failed: {exc})"
+            elif effort == "instant":
+                from .deep_brain import get_deep_brain
+                get_deep_brain().unload()   # free VRAM when back to instant
+            await self.send("status",
+                            text=f"🧠 {effort} mode{deep_info}")
             if hasattr(_active_provider, "set_effort"):
                 _active_provider.set_effort(effort)
-            await self.send("status",
-                            text=f"🧠 {effort} mode" +
-                                 (" — deep model" if effort == "deep" and
-                                  (self.cfg.deep_llm_model or
-                                   self.cfg.deep_llm_base_url) else ""))
         elif kind == "session":
             await self._handle_session(msg)
         elif kind == "share_screen":

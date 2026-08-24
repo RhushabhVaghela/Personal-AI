@@ -78,6 +78,14 @@
     <option value="en-IN-NeerjaNeural">Neerja (IN)</option>
     <option value="en-IN-PrabhatNeural">Prabhat (IN)</option>
   </select>
+  <select id="ttsengine" title="TTS engine — omnivoice/zipvoice/vibevoice run offline on your GPU">
+    <option value="">🔊 Engine…</option>
+    <option value="edge">Edge (online, fast)</option>
+    <option value="omnivoice">OmniVoice (offline · cloneable)</option>
+    <option value="zipvoice">ZipVoice (offline · flow-match)</option>
+    <option value="vibevoice">VibeVoice (long-form)</option>
+    <option value="openai">OpenAI (cloud)</option>
+  </select>
   <input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1"
          style="width:80px" title="speaking speed">
   <span class="badge" id="speedval">1.0×</span>
@@ -362,6 +370,11 @@ $("sharebtn").onclick = () => {
 };
 $("voice").onchange = () => ws.send(JSON.stringify(
   {kind:"set_voice", voice:$("voice").value}));
+$("ttsengine").onchange = () => {
+  if(!$("ttsengine").value) return;
+  ws.send(JSON.stringify({kind:"set_tts_engine",
+                          engine:$("ttsengine").value}));
+};
 let speedTimer = null;
 $("speed").oninput = () => {
   $("speedval").textContent = parseFloat($("speed").value).toFixed(2)+"×";
