@@ -227,6 +227,7 @@ All executions stream live into the dashboard's tool panel.
 - **Kill-switch hotkey** `Ctrl+Alt+Q` — checked before *and during* every input action; drags abort mid-way; dashboard button too
 - **Autonomy levels**: `confirm` (view/info only) / `auto_safe` (input + reminders, no shell) / `full`
 - **Process hygiene** — one model process ever; provider switch unloads old first; Ctrl+C sweeps orphans and frees ports; stale-port takeover on restart
+- **Switch rollback + capability gating** — every provider is pre-flighted before a switch (model files, GPU deps, build state). Unavailable providers are rejected with setup instructions *without* touching your working model; if a start fails mid-switch the previous brain is automatically restored. The dashboard dims controls that don't apply to the selected brain (e.g. voice pickers on Nemotron, whose TTS voice is baked into the GGUF)
 
 ---
 
@@ -306,6 +307,7 @@ dashboard_port: 8765
 
 ```bash
 python test_smoke.py         # 35 checks
+python test_rollback.py      # failed provider switch restores previous brain
 python test_integration.py   # dashboard HTTP + WS round-trip
 ```
 
@@ -430,6 +432,9 @@ project addresses them:
 | numpy/PIL ImportError (wrong cp build) | `pip install --force-reinstall numpy pillow` in the venv |
 | Wake word never fires | First run downloads ONNX models — check firewall; verify `openWakeWord loaded` in log |
 | Webcam unavailable | `pip install opencv-python-headless`, check no other app holds the camera |
+| Switching provider says "unavailable" | Read the message — it names the exact missing piece (build, repo, pip package) and your current model stays active |
+| `<think>` text appears in replies | Shouldn't happen (FSM sanitizer); report it — or use a non-reasoning model for voicechat |
+| Occasional MSS capture failure in logs | Transient screen-lock contention; PIL fallback engages automatically |
 
 ---
 
