@@ -1,6 +1,6 @@
 # PersonalAI-Assistant
 
-> A local-first, realtime personal AI assistant that **listens, talks, sees your screen, and controls your PC** — endless hands-free conversation like ChatGPT Voice, but running on *your* hardware. Online providers available as an option; **offline is the default**.
+> A local-first, realtime personal AI assistant that **listens, talks, sees your screen, and controls your PC** — endless hands-free conversation like ChatGPT Voice / Gemini Live, but running on *your* hardware. Online providers available as an option; **offline is the default**.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/RhushabhVaghela/Personal-AI)
@@ -12,10 +12,15 @@
 ## Table of Contents
 
 - [Overview](#overview)
-- [Key Features](#key-features)
+- [Feature Matrix vs ChatGPT Voice & Gemini Live](#feature-matrix-vs-chatgpt-voice--gemini-live)
 - [Architecture](#architecture)
 - [Hands-Free Mode (VAD)](#hands-free-mode-vad)
+- [Wake Word — "Proactive Audio"](#wake-word--proactive-audio)
+- [Screen Sharing](#screen-sharing)
 - [Memory — Hours-Long Conversations](#memory--hours-long-conversations)
+- [Reminders & Proactive Speech](#reminders--proactive-speech)
+- [Answer Cards](#answer-cards)
+- [Voice Identity & Reasoning Effort](#voice-identity--reasoning-effort)
 - [Providers & Profiles](#providers--profiles)
 - [Tools & Computer Control](#tools--computer-control)
 - [Safety](#safety)
@@ -35,31 +40,41 @@
 
 PersonalAI-Assistant combines three capabilities normally spread across separate products:
 
-1. **Realtime voice conversation** — always-on listening, it speaks when you speak, for hours
-2. **Screen vision** — it captures and understands your display
-3. **Computer control** — it clicks, types, scrolls, drags, and launches apps on your behalf
+1. **Realtime voice conversation** — always-on listening with wake-word gating, for hours
+2. **Screen vision** — on-demand screenshots or continuous Gemini-style screen sharing
+3. **Computer control** — it clicks, types, scrolls, drags, and launches apps on your behalf *(something neither ChatGPT nor Gemini can do)*
 
-**Offline-first:** every core capability runs on your machine with zero cloud calls. If your hardware isn't up to it, flip a dropdown to route ASR/LLM/TTS through OpenAI or Groq instead — same UI, same tools, same memory.
+**Offline-first:** every core capability runs locally with zero cloud calls. If your hardware isn't up to it, flip a dropdown to route ASR/LLM/TTS through OpenAI or Groq — same UI, same tools, same memory.
 
 Built and tested on an **RTX 5080 Laptop GPU (16 GB)**.
 
 ---
 
-## Key Features
+## Feature Matrix vs ChatGPT Voice & Gemini Live
 
-| Feature | Details |
-|---|---|
-| 👂 **Hands-free VAD** | Always-listening mic with end-of-speech detection — no buttons, just talk |
-| 🔇 **Echo guard** | Mic gate closes while the assistant speaks so it never hears itself |
-| 🗣️ **Speech-to-speech** | Nemotron VoiceChat 11B (GGUF Q4) — STT + reasoning + TTS in one model |
-| 🧩 **Modular pipeline** | Any ASR → any OpenAI-compat LLM → any TTS, swappable at runtime |
-| 💬 **Hours-long memory** | Persistent JSONL sessions + rolling context + auto-summarization |
-| ☁️ **Online profiles** | `local` / `online-openai` / `online-groq` — one dropdown, env-var API keys |
-| 👁️ **Screen vision** | Native mmproj perception or dedicated VLM (Qwen2-VL) |
-| 🖱️ **Computer control** | 8 tools: screenshot, click, drag, scroll, type, keys, apps, shell |
-| ⏹️ **Barge-in** | Stop button interrupts playback instantly; mic reopens |
-| 🛑 **Kill-switch** | Global `Ctrl+Alt+Q` gates every input action mid-flight |
-| ⚡ **Latency badge** | Per-turn response time shown live |
+| Feature | ChatGPT Voice | Gemini Live | PersonalAI |
+|---|---|---|---|
+| Hands-free VAD listening | ✅ | ✅ | ✅ |
+| Barge-in interrupt | ✅ full-duplex | ✅ | ✅ Stop button + mic reopen |
+| Echo/self-hearing guard | ✅ | ✅ | ✅ |
+| Wake word / responds only when addressed | ✅ | ✅ proactive audio | ✅ openWakeWord + transcript gate |
+| Backchanneling ("mm-hmm") | ✅ GPT-Live | ✅ | ✅ cached ack clips |
+| Captions overlay | ✅ cc button | ✅ auto when muted | ✅ every reply |
+| Multiple voices | ✅ 9 | ✅ 10 | ✅ 7+ (any edge-tts voice) |
+| Speaking speed control | ✅ by request | ✅ slider | ✅ slider 0.5–2× |
+| Conversation memory across sessions | ✅ | ✅ | ✅ JSONL + rolling summary |
+| Transcript history + export | ✅ in chat | ✅ in app | ✅ panel + JSONL export |
+| Screen sharing | ✅ Advanced mode | ✅ | ✅ continuous stream + tool |
+| Live video/camera | ✅ mobile | ✅ + overlays | ➖ N/A (desktop; webcam possible) |
+| App integrations (Calendar/Tasks) | limited | ✅ Google apps | ⚠️ reminders built-in; calendar sync planned |
+| Reminders / proactive speech | via apps | ✅ | ✅ spoken aloud, offline |
+| Answer cards (weather/time/widgets) | ✅ | ✅ | ✅ weather · clock · reminder |
+| Reasoning effort selector | ✅ instant/deep | ✅ thinking modes | ✅ instant/deep w/ model escalation |
+| Emotion-adaptive tone (affective) | ✅ | ✅ | ❌ needs better open S2S models |
+| Background/locked-screen continuation | ✅ | ✅ | ⚠️ server persists; tray app planned |
+| **Real PC control** (click/type/apps/shell) | ❌ | ❌ | ✅ |
+| Session length | ~limits | 15 min audio (!) | ♾️ unlimited |
+| Fully offline | ❌ | ❌ | ✅ |
 
 ---
 
@@ -68,58 +83,100 @@ Built and tested on an **RTX 5080 Laptop GPU (16 GB)**.
 ```
 ┌────────────────────────────── assistant core ──────────────────────────────┐
 │                                                                            │
-│  👂 mic ──► VAD engine ──► utterance wav ──┐      (echo-guarded)          │
-│  ⌨️ text ──────────────────────────────────┤                               │
-│                                            ▼                               │
-│  Provider (runtime-swappable):                                             │
-│    voicechat   Nemotron VoiceChat 11B GGUF (speech→speech, one model)      │
-│    modular     ASR → LLM(+memory) → TTS   [local or online profile]        │
-│    hybrid      VoiceChat voice + Qwen2-VL screen vision                    │
-│                                            │                               │
-│  💬 memory ◄── rolling context + summary ──┤                               │
-│                                            ▼                               │
-│  🧠 tool loop ──► JSON tool calls → ToolExecutor → results fed back        │
+│  👂 mic ──► VAD engine ──► wake gate ──► utterance wav ─┐  (echo-guarded) │
+│  ⌨️ text ────────────────────────────────────────────────┤                │
+│                                                          ▼                │
+│  Provider (runtime-swappable):                                           │
+│    voicechat   Nemotron VoiceChat 11B GGUF (speech→speech, one model)    │
+│    modular     ASR → LLM(+memory, tools) → TTS   [local or online]       │
+│    hybrid      VoiceChat voice + Qwen2-VL screen vision                  │
+│                                                          │                │
+│  💬 memory ◄── rolling context + summary ────────────────┤                │
+│  🖥 screen share ──► latest frame for look_at_screen ────┤                │
+│                                                          ▼                │
+│  🧠 tool loop ──► JSON tool calls → ToolExecutor → cards/events → back    │
 │                                                                            │
-│  🛡️ safety ──► kill-switch hotkey + autonomy gating on EVERY action        │
+│  🛡️ safety ──► kill-switch hotkey + autonomy gating on EVERY action       │
 └────────────────────────────────────────────────────────────────────────────┘
         │                                   │
    terminal (--hands-free)          web dashboard
-                          mic ∙ chat ∙ audio queue ∙ stop ∙ live screenshot ∙
-                          tool stream ∙ provider/profile pickers ∙ kill button
+                      mic ∙ wake ∙ share-screen ∙ audio queue ∙ stop ∙ cards ∙
+                      transcript ∙ voices/speed/effort pickers ∙ kill button
 ```
 
 ---
 
 ## Hands-Free Mode (VAD)
 
-The flagship ChatGPT-Voice-style experience:
-
 ```
-👂 ON → you talk → silence detected (~700 ms) → utterance sent →
+👂 ON → you talk → silence (~700 ms) → utterance sent →
 assistant replies (mic gated) → playback ends → hangover → listening again
 ```
 
-- **WebRTC VAD** (CPU-light, robust) with an adaptive **energy VAD** fallback
+- **WebRTC VAD** (robust) with adaptive **energy VAD** fallback
 - Speech-start confirmed after ~90 ms of voice; end-of-speech after 700 ms silence
-- **Echo guard**: while the reply plays, the mic gate is closed — no self-hearing loops
-- Toggle in the dashboard (`👂 Hands-free`) or run `python -m pai.terminal --hands-free`
+- Toggle `👂 Hands-free` in the dashboard, or `python -m pai.terminal --hands-free`
 
----
+## Wake Word — "Proactive Audio"
+
+Arms hands-free so the assistant only responds when addressed:
+
+```
+📣 Armed → hears "hey assistant, what's the weather" → accepts ("what's the weather")
+        → follow-ups stay active 90 s → re-arms
+```
+
+Two-layer hybrid:
+1. **openWakeWord** (offline, CPU) — stock audio models: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`… configurable subset via `wake_oww_models`
+2. **Transcript gate** (universal) — utterances without a configured phrase (`wake_phrases`) are dropped before reaching the model; works even with online providers
+
+## Screen Sharing
+
+Gemini-Live-style continuous sharing:
+
+- `🖥 Share screen` toggles a change-detected capture loop (~0.7 s interval, 960 px frames) that streams live into the dashboard's screenshot panel
+- The latest frame is kept server-side — the **`look_at_screen`** tool lets the assistant inspect what you're seeing on demand ("what am I looking at?")
 
 ## Memory — Hours-Long Conversations
 
-`ConversationStore` gives the assistant durable context:
+- Every turn appended to `sessions/<name>.jsonl` (survives restarts)
+- Last N turns (`memory_turns: 24`) sent as rolling context each request
+- Older turns fold into a running **summary** kept at the front of the prompt
+- Dashboard: `🆕 New chat` (archives), `🗒 Transcript` viewer, `⬇ Export`
 
-- Every turn appended to `sessions/<name>.jsonl` — survives restarts
-- Last N turns (`memory_turns: 24`) sent as rolling context every request
-- Past that, older turns fold into a running **summary** kept at the front of the prompt (extractive by default; plug an LLM summarizer via `set_summarizer`)
-- `reset()` archives the session and starts fresh
+## Reminders & Proactive Speech
+
+```
+You: "remind me at 5pm to call mom"     → set_reminder tool → card confirms
+...at 5pm...                            → assistant SPEAKS UP unprompted 🔊
+```
+
+- Natural-time parsing: `at 5pm`, `at 17:30`, `in 10 minutes/hours` (past times roll to tomorrow)
+- Persistent (`reminders.json`) · `list_reminders` / `cancel_reminder`
+- Delivered as TTS to all connected dashboards, plus a ⏰ card
+
+## Answer Cards
+
+Floating widgets top-right of the dashboard (auto-expire ~20 s):
+
+| Card | Trigger |
+|---|---|
+| 🌤 Weather (temp/desc/humidity, keyless wttr.in) | "what's the weather in Mumbai?" |
+| 🕐 Clock (time + date) | "what time is it?" |
+| ⏰ Reminder confirmation | any reminder set |
+
+## Voice Identity & Reasoning Effort
+
+- **Voice picker**: Aria, Jenny, Guy, Ana, Sonia (UK), Neerja/Prabhat (IN) — or any edge-tts voice name in config
+- **Speed slider**: 0.5–2×, applied across edge-tts / OpenAI TTS
+- **Backchannels**: short "Mm-hmm?" ack clip plays while the LLM thinks (`backchannel: false` to disable)
+- **⚡ Instant / 🧠 Deep effort**: deep escalates to a bigger model via `deep_llm_base_url` / `deep_llm_model` (GPT-Live delegation parity)
 
 ---
 
 ## Providers & Profiles
 
-### Brains (what powers the conversation)
+### Brains
 
 | Provider | Voice | Vision | Needs |
 |---|---|---|---|
@@ -127,17 +184,17 @@ assistant replies (mic gated) → playback ends → hangover → listening again
 | `modular` | ASR → LLM → TTS pipeline | — | backend services per profile |
 | `hybrid` | VoiceChat | + Qwen2-VL | voicechat deps + VLM server |
 
-### Profiles (where those services live)
+### Profiles (where services live)
 
 | Profile | ASR | LLM | TTS | Offline? | Env key |
 |---|---|---|---|---|---|
-| `💻 local` *(default)* | Whisper server :9000 | any OpenAI-compat :8081 | OmniVoice :8889 / edge-tts | ✅ yes | — |
-| `☁ online-openai` | Whisper API | GPT-4o-mini | OpenAI TTS | ❌ | `OPENAI_API_KEY` |
-| `☁ online-groq` | whisper-large-v3 | Llama-3.3-70B | browser Web Speech | ❌ | `GROQ_API_KEY` |
+| `💻 local` *(default)* | Whisper server :9000 | OpenAI-compat :8081 | OmniVoice :8889 / edge-tts | ✅ | — |
+| `☁ online-openai` | Whisper API | gpt-4o-mini | OpenAI TTS | ❌ | `OPENAI_API_KEY` |
+| `☁ online-groq` | whisper-large-v3 | llama-3.3-70B | browser Web Speech | ❌ | `GROQ_API_KEY` |
 
-Switch profiles from the dashboard dropdown — mid-session, no reload. Keys are read from environment variables only (never stored in config).
+Switch profiles mid-session from the dashboard dropdown. Keys come from env vars only.
 
-> **Groq note:** its free-tier API has no TTS endpoint, so replies are spoken by your browser's built-in Web Speech synthesis — zero extra latency, zero cost.
+> **Groq note:** its free tier has no TTS endpoint, so replies use your browser's built-in Web Speech synthesis.
 
 ---
 
@@ -145,25 +202,29 @@ Switch profiles from the dashboard dropdown — mid-session, no reload. Keys are
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `screenshot` | `monitor`, `max_width` | auto-downscaled for VLM payloads |
-| `click` | `x, y, button?, double?` | animated move, validated buttons |
-| `drag` | `x1, y1, x2, y2` | abortable mid-drag by kill-switch |
+| `screenshot` | `monitor`, `max_width` | auto-downscaled payloads |
+| `look_at_screen` | — | inspects the live shared frame |
+| `set_reminder` | `when_text`, `text` | spoken aloud when due |
+| `list_reminders` / `cancel_reminder` | `id?` | manage pending |
+| `get_time` | — | emits clock card |
+| `get_weather` | `location?` | wttr.in, emits weather card |
+| `click` | `x, y, button?, double?` | animated move |
+| `drag` | `x1, y1, x2, y2` | kill-switch abortable mid-drag |
 | `scroll` | `amount, x?, y?` | positive = up |
 | `type_text` | `text` | literal typing |
-| `press_key` | `key` | full pynput table: `f5`, `pgup`, `ctrl+s`, media keys… |
-| `open_app` | `target` | name resolution + sanitized shell fallback |
+| `press_key` | `key` | full pynput table (`f5`, `pgup`, combos…) |
+| `open_app` | `target` | name resolution + sanitized fallback |
 | `run_command` | `command` | **blocked unless autonomy=full** |
 
-Every execution is streamed to the dashboard's live tool panel.
+All executions stream live into the dashboard's tool panel.
 
 ---
 
 ## Safety
 
 - **Kill-switch hotkey** `Ctrl+Alt+Q` — checked before *and during* every input action; drags abort mid-way; dashboard button too
-- **Autonomy levels**: `confirm` (view-only) / `auto_safe` (no shell) / `full`
-- **Process hygiene** — exactly one model process ever; switching providers unloads the old model first; Ctrl+C sweeps orphans and frees ports
-- **Stale-port takeover** — a crashed instance's port is detected and released automatically
+- **Autonomy levels**: `confirm` (view/info only) / `auto_safe` (input + reminders, no shell) / `full`
+- **Process hygiene** — one model process ever; provider switch unloads old first; Ctrl+C sweeps orphans and frees ports; stale-port takeover on restart
 
 ---
 
@@ -178,50 +239,49 @@ pip install -e .
 ```
 
 Requirements: Windows 10/11, Python 3.10+, FFmpeg on PATH.
-Optional GPU models go in `D:\hoidhxd-NVIDIA-NemotronLabs-VoiceChat-11B-GGUF\` (path configurable in `src/pai/config.py`).
+GPU models live in `D:\hoidhxd-NVIDIA-NemotronLabs-VoiceChat-11B-GGUF\` (paths in `src/pai/config.py`).
 
-For the `local` profile's modular provider, also run: Whisper server (:9000), an OpenAI-compatible LLM (:8081), OmniVoice (:8889). For online profiles, set `OPENAI_API_KEY` / `GROQ_API_KEY`.
+For `local` modular profile also run: Whisper server (:9000), OpenAI-compat LLM (:8081), OmniVoice (:8889).
+For online profiles set `OPENAI_API_KEY` / `GROQ_API_KEY`.
+
+First run of wake word downloads ONNX models (~10 MB) automatically.
 
 ---
 
 ## Usage
 
 ```bash
-# Web dashboard (recommended — full UX)
-python -m pai.server            # → http://127.0.0.1:8765
-
-# Terminal push-to-talk
-python -m pai.terminal
-
-# Terminal hands-free (just talk)
-python -m pai.terminal --hands-free
-
-# Options
-python -m pai.terminal --provider modular --autonomy confirm --seconds 6
+python -m pai.server                    # dashboard → http://127.0.0.1:8765
+python -m pai.terminal                  # push-to-talk
+python -m pai.terminal --hands-free     # always-listening
 ```
 
-Dashboard controls: provider dropdown · profile dropdown (offline/online) ·
-🎙 hold-to-talk · 👂 hands-free toggle · ⏹ Stop (barge-in) · text input ·
-📸 screenshot · 🛑 kill-switch · live tool panel · latency badge.
+Dashboard header: provider · profile · voice · speed · effort · status · latency · hands-free badge · kill badge.
+Composer: text input · 🎙 hold-to-talk · 👂 hands-free · 📣 wake word · 🖥 share screen · ⏹ stop · send.
+Sidebar: 📸 screenshot · 🛑 kill-switch · 🆕 new chat · 🗒 transcript · ⬇ export · live tool panel.
 
 ---
 
 ## Configuration
 
-`config.yaml` (all optional):
+`config.yaml` — see the fully-commented file in the repo root. Key sections:
 
 ```yaml
 provider: voicechat            # voicechat | modular | hybrid
 profile: local                 # local | online-openai | online-groq
 
 hands_free: true
-vad_engine: auto               # auto | webrtc | energy
-vad_silence_ms: 700            # end-of-speech detection
-vad_aggressiveness: 2
+wake_phrases: ["hey assistant", "assistant", "computer"]
+wake_oww_models: ["hey_jarvis", "alexa"]
 
-memory_turns: 24               # rolling context window
-memory_summarize_after: 40
-session_name: default          # sessions/<name>.jsonl
+memory_turns: 24
+session_name: default
+
+tts_voice: en-US-AriaNeural
+tts_speed: 1.0
+backchannel: true
+reasoning_effort: instant      # instant | deep
+deep_llm_model: ""             # bigger model for deep mode
 
 autonomy: full                 # confirm | auto_safe | full
 kill_switch_keys: ctrl+alt+q
@@ -233,13 +293,14 @@ dashboard_port: 8765
 ## Testing
 
 ```bash
-python test_smoke.py         # 32 checks: capture, tools, autonomy, VAD-ready, providers
-python test_integration.py   # dashboard HTTP + WS + live screenshot round-trip
+python test_smoke.py         # 32 checks
+python test_integration.py   # dashboard HTTP + WS round-trip
 ```
 
-All passing, plus live-verified: model boot/fallback, single-process guarantee,
-graceful shutdown, stale takeover, hands-free toggles, profile switches,
-end-to-end audio turns.
+Live-verified end-to-end: model boot/fallback, single-process guarantee,
+graceful shutdown, stale takeover, hands-free + wake gating, profile/voice/
+effort switches, screen-share streaming, reminder scheduling + proactive
+fire, weather/clock cards.
 
 ---
 
@@ -247,24 +308,25 @@ end-to-end audio turns.
 
 ```
 src/pai/
-  config.py              paths, PROFILES (local/online), VAD + memory settings
-  server.py              web dashboard: HTTP+WS, shared provider lifecycle,
-                         hands-free loop wiring, graceful shutdown
-  terminal.py            push-to-talk + --hands-free CLI
-  vad.py                 WebRTC/energy VAD state machines, echo guard,
-                         continuous mic listener
-  memory.py              ConversationStore: JSONL persistence, rolling
-                         context, summarization
-  providers.py           registry
+  config.py              PROFILES (local/online), all runtime settings
+  server.py              dashboard HTTP+WS, shared provider lifecycle,
+                         hands-free + wake + share wiring, reminders,
+                         graceful shutdown
+  vad.py                 WebRTC/energy VAD, echo guard, mic listener
+  wakeword.py            openWakeWord + transcript phrase gate
+  screenshare.py         change-detected continuous frame streamer
+  memory.py              ConversationStore: JSONL, rolling window, summaries
+  reminders.py           persistent store, natural-time parser, scheduler
   provider_voicechat.py  Nemotron speech-to-speech (file protocol)
-  provider_modular.py    ASR→LLM(+memory)→TTS, local+online backends
+  provider_modular.py    ASR→LLM(+memory/tools)→TTS, local + online
   provider_hybrid.py     VoiceChat + VLM screen description
-  screen_capture.py      MSS→PIL fallback, caching, downscaling
+  tools.py               tool protocol, autonomy matrix, cards, events
+  screen_capture.py      MSS→PIL fallback, cache, downscale
   input_control.py       pynput control + global KillSwitch
-  tools.py               JSON tool protocol, autonomy matrix, event stream
   audio.py               mic record / playback
-static/index.html        dashboard UI (dark, zero-build)
-sessions/                persistent conversation JSONL files
+static/index.html        dashboard UI
+sessions/                conversation JSONL files
+reminders.json           persisted reminders
 ```
 
 ---
@@ -277,21 +339,21 @@ sessions/                persistent conversation JSONL files
 | RAM | 16 GB | 32 GB |
 | Disk | ~10 GB models | — |
 
-No GPU? Use the `modular` provider with an **online profile**, or a small CPU
-LLM via llama.cpp (`llm_base_url`). Everything else (VAD, capture, tools,
-dashboard) is CPU-native.
+No GPU? Use `modular` + an **online profile**, or a small CPU LLM. Everything
+else (VAD, wake word, capture, tools, dashboard, reminders) is CPU-native.
 
 ---
 
 ## Roadmap
 
 - [ ] Streaming/staged TTS (speak first sentence while generating rest)
-- [ ] Wake word ("hey assistant") before VAD hand-off
-- [x] ~~UIA element-tree clicking~~ → coordinates + screenshots work well today; element-name clicking next
+- [ ] Custom wake-word training (your own phrase)
+- [ ] Google Calendar sync under online profiles
 - [ ] Wire screenshots into VoiceChat image turns natively
 - [ ] Function-head GGUF support once exe builds support the architecture
 - [ ] LLM-backed conversation summarizer hook-up
 - [ ] System-tray app packaging
+- [ ] Webcam input alongside screen share
 
 ---
 
@@ -299,20 +361,21 @@ dashboard) is CPU-native.
 
 | Symptom | Fix |
 |---|---|
-| `error 10048` port busy | Auto-handled — stale instance is killed; retry if persistent |
+| `error 10048` port busy | Auto-handled — stale instance killed; retry if persistent |
 | Dashboard "connection closed" loop | Hard-refresh (`Ctrl+F5`) |
 | `(timeout waiting for voicechat reply)` | First load ~10 s; check `nvidia-smi` for VRAM orphans |
-| `unknown model architecture: voicechat_function_head` | Normal on older exe builds — auto-falls back |
-| Mic never triggers in hands-free | Check default mic in Windows settings; try `vad_engine: energy` |
-| Modular: connection refused :8081/:9000 | Start those services, or switch profile to online |
-| numpy/PIL `ImportError` (wrong cp version) | `pip install --force-reinstall numpy pillow` in the project venv |
+| `unknown architecture: voicechat_function_head` | Normal on older exe builds — auto-falls back |
+| Mic never triggers in hands-free | Check default mic; try `vad_engine: energy` |
+| Modular: connection refused :8081/:9000 | Start those services or switch profile to online |
+| numpy/PIL ImportError (wrong cp build) | `pip install --force-reinstall numpy pillow` in the venv |
+| Wake word never fires | First run downloads ONNX models — check firewall; verify `openWakeWord loaded` in log |
 
 ---
 
 ## Acknowledgements
 
 Nemotron VoiceChat 11B (NVIDIA) · llama.cpp · Whisper · OmniVoice · Edge TTS ·
-Qwen2-VL · webrtcvad · pynput · mss
+Qwen2-VL · openWakeWord · webrtcvad · pynput · mss · wttr.in
 
 ---
 

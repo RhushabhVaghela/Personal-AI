@@ -2,11 +2,14 @@
 # Provider: voicechat | modular | hybrid
 provider: voicechat
 
-# --- modular pipeline ---
+# Profile: local | online-openai | online-groq   (offline-first; online needs API keys in env)
+profile: local
+
+# --- modular pipeline (overridden by profile) ---
 asr_backend: whisper_server
 llm_base_url: http://127.0.0.1:8081/v1
 llm_model: hy-mt2
-tts_backend: omnivoice
+tts_backend: omnivoice        # omnivoice | edge | openai | browser
 
 # --- hybrid (vision via separate VLM) ---
 vlm_base_url: http://127.0.0.1:8082/v1
@@ -17,10 +20,39 @@ voicechat_use_funchead: true
 voicechat_port: 8123
 
 # --- audio ---
-push_to_talk_seconds: 0   # 0 = record until Enter
+push_to_talk_seconds: 0       # 0 = record until Enter
 
-# --- autonomy ---
-autonomy: full            # full | auto_safe | confirm
+# --- hands-free (VAD) ---
+hands_free: true
+vad_engine: auto              # auto | webrtc | energy
+vad_silence_ms: 700           # end-of-speech detection hangover
+
+# --- wake word ("proactive audio") ---
+wake_phrases:                 # transcript gate phrases
+  - hey assistant
+  - assistant
+  - computer
+wake_oww_models:              # offline openWakeWord audio models
+  - hey_jarvis
+  - alexa
+
+# --- memory (hours-long conversations) ---
+memory_turns: 24              # rolling context window
+memory_summarize_after: 40
+session_name: default         # sessions/<name>.jsonl
+
+# --- voice identity ---
+tts_voice: en-US-AriaNeural   # any edge-tts voice name
+tts_speed: 1.0                # 0.5 - 2.0
+backchannel: true             # "mm-hmm?" acks while thinking
+
+# --- reasoning effort (GPT-Live delegation parity) ---
+reasoning_effort: instant     # instant | deep
+deep_llm_base_url: ""         # empty = same LLM endpoint
+deep_llm_model: ""            # bigger model for 'deep' mode
+
+# --- autonomy & safety ---
+autonomy: full                # full | auto_safe | confirm
 kill_switch_keys: ctrl+alt+q
 
 # --- ui ---
