@@ -92,6 +92,10 @@ class Config:
     # voicechat provider
     voicechat_use_funchead: bool = True
     voicechat_port: int = 8123
+    voicechat_tts_mode: str = "native"
+    # native = the model's built-in voice (fastest, fixed)
+    # edge   = re-synthesize the reply with tts_voice/tts_speed (picker works,
+    #          adds ~1s latency; needs internet for edge-tts)
     # audio
     sample_rate: int = 16000
     push_to_talk_seconds: float = 6.0

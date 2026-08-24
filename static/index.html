@@ -368,6 +368,17 @@ $("speed").oninput = () => {
 };
 $("effort").onchange = () => ws.send(JSON.stringify(
   {kind:"set_effort", effort:$("effort").value}));
+let nemotronVoiced = false;
+const voT = document.createElement("label");
+voT.style.cssText = "display:flex;align-items:center;gap:4px;font-size:12px;"+
+  "color:var(--muted);cursor:pointer";
+voT.innerHTML = `<input type="checkbox" id="voicechat-voice" style="accent-color:var(--accent)">
+  <span title="Re-synthesize Nemotron replies with the selected voice/speed (needs internet, ~+1s)">voice on Nemotron</span>`;
+$("effort").after(voT);
+document.getElementById("voicechat-voice").onchange = e => {
+  ws.send(JSON.stringify({kind:"set_voicechat_tts",
+                          mode: e.target.checked ? "edge" : "native"}));
+};
 $("newchat").onclick = () => { $("log").innerHTML=""; toolCount=0;
   $("tools").innerHTML=""; ws.send(JSON.stringify(
   {kind:"session", action:"new"})); };

@@ -216,6 +216,14 @@ class AssistantSession:
                 self.cfg.tts_speed = max(0.5, min(2.0, float(speed)))
             await self.send("voice_ok", voice=self.cfg.tts_voice,
                             speed=self.cfg.tts_speed)
+        elif kind == "set_voicechat_tts":
+            mode = msg.get("mode", "native")
+            self.cfg.voicechat_tts_mode = mode if mode in ("native", "edge") \
+                else "native"
+            await self.send("status",
+                text="🎙 Nemotron re-voicing ON — replies use your selected "
+                     "voice" if self.cfg.voicechat_tts_mode == "edge"
+                else "🎙 Nemotron native voice (fastest)")
         elif kind == "set_effort":
             # GPT-Live reasoning effort: instant | deep (escalates model)
             effort = msg.get("effort", "instant")
@@ -512,6 +520,23 @@ class AssistantSession:
                 log.info("turn: reply transcript: %s", text[:200])
             await self.send("reply", text=text or "(empty reply)")
             if audio:
+                # optional re-voicing: swap the built-in Nemotron voice for
+                # the user-selected edge-tts voice + speed
+                if (getattr(self.cfg, "voicechat_tts_mode", "native") == "edge"
+                        and text and text not in ("(voice reply)", "")):
+                    await self.send("status",
+                                    text="🎙 applying selected voice...")
+                    try:
+                        from .provider_modular import ModularProvider
+                        mp = ModularProvider()
+                        out = LOG_DIR / f"reply_voiced_{int(time.time())}.mp3"
+                        audio = await loop.run_in_executor(
+                            None, mp._edge_tts, text, out)
+                        log.info("turn: re-voiced as %s @ %sx",
+                                 self.cfg.tts_voice, self.cfg.tts_speed)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "re-voice failed (%s) — keeping native voice", exc)
                 await self._send_audio(Path(audio))
 
     _ack_cache: dict = {}
