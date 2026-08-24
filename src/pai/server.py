@@ -420,16 +420,43 @@ class AssistantSession:
             await self.send("transcript", text=transcript)
             # GPT-Live-style backchannel while the model thinks
             asyncio.ensure_future(self._play_backchannel())
+            # streaming path: sentence-chunked TTS as the LLM generates
             await self.send("status", text="thinking...")
-            result = await loop.run_in_executor(
-                None, provider.think, transcript, self.executor)
-            await self.send("reply", text=result["text"])
-            if result["text"]:
-                await self.send("status", text="speaking (TTS)...")
-                spoken = await loop.run_in_executor(
-                    None, provider.speak, result["text"],
-                    LOG_DIR / "reply.wav")
-                await self._send_audio(spoken)
+            t0 = time.time()
+            messages = provider._build_messages(transcript, self.executor)
+            got_tool_call = False
+
+            def gen():
+                nonlocal got_tool_call
+                for piece in provider._chat_stream(
+                        messages, deep=self.cfg.reasoning_effort == "deep"):
+                    if not got_tool_call and piece.lstrip()[:1] in ("{", "`"):
+                        got_tool_call = True   # tool-call reply — abort stream
+                        return
+                    if not got_tool_call:
+                        yield piece
+
+            def on_sentence(sentence, audio_path):
+                if audio_path and _MAIN_LOOP and _MAIN_LOOP.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._send_audio(audio_path), _MAIN_LOOP)
+
+            full = await loop.run_in_executor(
+                None, lambda: provider.speak_streaming(gen(), on_sentence))
+            if got_tool_call:
+                # classic tool loop handles JSON replies
+                result = await loop.run_in_executor(
+                    None, provider.think, transcript, self.executor)
+                await self.send("reply", text=result["text"])
+                if result["text"]:
+                    spoken = await loop.run_in_executor(
+                        None, provider.speak, result["text"],
+                        LOG_DIR / "reply.wav")
+                    await self._send_audio(spoken)
+                return
+            log.info("streamed turn finished in %.1fs", time.time() - t0)
+            provider.memory.add("assistant", full)
+            await self.send("reply", text=full)
         else:
             log.info("turn: provider=%s wav=%s (%d bytes) — processing",
                      provider.name, wav.name, wav.stat().st_size)

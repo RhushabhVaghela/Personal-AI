@@ -120,9 +120,31 @@ class ModularProvider:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _build_messages(self, transcript: str,
+                        executor: pai_tools.ToolExecutor,
+                        screen_context: str = "") -> list[dict]:
+        """Shared prompt assembly (used by think() and the streaming path)."""
+        messages = [{"role": "system",
+                     "content": self.SYSTEM_PROMPT.replace(
+                         "{tools}", json.dumps(pai_tools.tool_schema(), indent=1))}]
+        for m in self.memory.context():
+            messages.append(m)
+        if screen_context:
+            messages.append({"role": "user",
+                             "content": f"[Screen context] {screen_context}"})
+        messages.append({"role": "user", "content": transcript})
+        self.memory.add("user", transcript)
+        return messages
+
     def _chat(self, messages: list[dict], deep: bool = False) -> str:
-        """Chat via the active LLM. deep=True escalates to the bigger model
-        (GPT-Live delegation parity) when configured."""
+        """Non-streaming chat (used for tool-loop rounds)."""
+        text = ""
+        for chunk in self._chat_stream(messages, deep):
+            text += chunk
+        return text
+
+    def _chat_stream(self, messages: list[dict], deep: bool = False):
+        """Stream LLM output token-by-token via SSE (yields text deltas)."""
         base_url = self.cfg.llm_base_url
         model = self.cfg.llm_model
         key_env = config.PROFILES[self.profile]["llm_key_env"]
@@ -131,8 +153,6 @@ class ModularProvider:
                 base_url = self.cfg.deep_llm_base_url
             if self.cfg.deep_llm_model:
                 model = self.cfg.deep_llm_model
-                if "openai.com" in base_url and not self.cfg.deep_llm_base_url:
-                    pass  # same endpoint, bigger model
             log.info("llm[%s]: DEEP reasoning via %s", self.profile, model)
         else:
             log.info("llm[%s]: instant via %s", self.profile, model)
@@ -142,11 +162,86 @@ class ModularProvider:
             f"{base_url}/chat/completions",
             headers=headers,
             json={"model": model, "messages": messages,
-                  "temperature": 0.4, "max_tokens": 512},
+                  "temperature": 0.4, "max_tokens": 512, "stream": True},
             timeout=300 if deep else 180,
+            stream=True,
         )
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        for line in r.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload.strip() == "[DONE]":
+                break
+            try:
+                delta = json.loads(payload)["choices"][0].get("delta", {})
+                piece = delta.get("content") or ""
+                if piece:
+                    yield piece
+            except Exception:  # noqa: BLE001
+                continue
+
+    def speak_streaming(self, text_stream, on_sentence=None) -> str:
+        """Sentence-chunked streaming TTS: synthesize+return each sentence as
+        soon as it completes. Returns the full text.
+
+        Yields (sentence, audio_path_or_None) via on_sentence callback so the
+        caller can start playback while generation continues.
+        """
+        import re as _re
+        buf = ""
+        full = ""
+        sentences = []
+        for piece in text_stream:
+            buf += piece
+            full += piece
+            # sentence boundary heuristic
+            m = None
+            for mm in _re.finditer(r"[.!?](\s|$)", buf):
+                m = mm
+            if m:
+                sentence = buf[:m.end()].strip()
+                buf = buf[m.end():]
+                if sentence:
+                    sentences.append(sentence)
+                    if on_sentence:
+                        try:
+                            audio_path = self._tts_one(sentence)
+                            on_sentence(sentence, audio_path)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("streaming TTS chunk failed: %s", exc)
+                            on_sentence(sentence, None)
+        tail = buf.strip()
+        if tail:
+            sentences.append(tail)
+            if on_sentence:
+                try:
+                    audio_path = self._tts_one(tail)
+                    on_sentence(tail, audio_path)
+                except Exception:  # noqa: BLE001
+                    on_sentence(tail, None)
+        return full
+
+    def _tts_one(self, sentence: str, idx: int = 0):
+        """Fast single-sentence TTS → temp file (backend-aware)."""
+        import tempfile
+        out = Path(tempfile.gettempdir()) / f"pai_stream_{int(time.time()*1000)}_{idx}"
+        backend = self.cfg.tts_backend
+        if backend == "openai":
+            p = self._openai_tts(sentence, out.with_suffix(".wav"))
+        elif backend == "browser":
+            raise BrowserTTSSignal("browser")
+        else:  # edge (fastest local-ish) / omnivoice fallback
+            try:
+                p = self._edge_tts(sentence, out.with_suffix(".mp3"))
+            except Exception:
+                r = requests.post(
+                    config.OMNIVOICE_BASE_URL + config.OMNIVOICE_TTS_ENDPOINT,
+                    json={"model": "omnivoice", "input": sentence,
+                          "response_format": "wav"}, timeout=60)
+                p = out.with_suffix(".wav")
+                p.write_bytes(r.content)
+        return p
 
     def set_effort(self, effort: str) -> None:
         self.cfg.reasoning_effort = effort if effort in ("instant", "deep") \
