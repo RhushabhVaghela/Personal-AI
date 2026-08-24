@@ -254,6 +254,7 @@ First run of wake word downloads ONNX models (~10 MB) automatically.
 python -m pai.server                    # dashboard → http://127.0.0.1:8765
 python -m pai.terminal                  # push-to-talk
 python -m pai.terminal --hands-free     # always-listening
+python -m pai.tray                      # system-tray app (server + icon)
 ```
 
 Dashboard header: provider · profile · voice · speed · effort · status · latency · hands-free badge · kill badge.
@@ -346,14 +347,15 @@ else (VAD, wake word, capture, tools, dashboard, reminders) is CPU-native.
 
 ## Roadmap
 
-- [ ] Streaming/staged TTS (speak first sentence while generating rest)
-- [ ] Custom wake-word training (your own phrase)
-- [ ] Google Calendar sync under online profiles
-- [ ] Wire screenshots into VoiceChat image turns natively
-- [ ] Function-head GGUF support once exe builds support the architecture
-- [ ] LLM-backed conversation summarizer hook-up
-- [ ] System-tray app packaging
-- [ ] Webcam input alongside screen share
+- [x] ~~Streaming/staged TTS~~ — SSE stream + sentence-chunked playback
+- [x] ~~Custom wake-word models~~ — `wake_custom_model` loads your trained .onnx
+- [x] ~~Google Calendar sync~~ — `google_calendar: true` mirrors reminders (gcal CLI or service account)
+- [x] ~~Wire screenshots into VoiceChat image turns natively~~ — shared frame auto-attaches
+- [x] ~~LLM-backed conversation summarizer hook-up~~ — wired with extractive fallback
+- [x] ~~System-tray app packaging~~ — `python -m pai.tray`
+- [x] ~~Webcam input alongside screen share~~ — camera mode via OpenCV
+- [ ] Affective tone (emotion-adaptive prosody) — awaiting open S2S models
+- [ ] Multi-user speaker identification
 
 ---
 
