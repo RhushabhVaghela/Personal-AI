@@ -325,6 +325,11 @@ src/pai/
   provider_voicechat.py  Nemotron speech-to-speech (file protocol)
   provider_modular.py    ASR→LLM(+memory/tools)→TTS, local + online
   provider_hybrid.py     VoiceChat + VLM screen description
+  provider_qwen_omni.py  Qwen2.5-Omni-7B GPTQ-Int4 thinker-talker S2S
+  provider_glm_voice.py  GLM-4-Voice 9B int4 (emotion-steerable)
+  provider_moshi.py      Moshi/MoshiVis full-duplex bridge (rust q8)
+  deep_brain.py          on-demand Qwen3-30B-A3B MoE server (lazy, auto-unload)
+  tts_engines.py         local neural TTS: OmniVoice / ZipVoice / VibeVoice
   tools.py               tool protocol, autonomy matrix, cards, events
   screen_capture.py      MSS→PIL fallback, cache, downscale
   input_control.py       pynput control + global KillSwitch
@@ -333,6 +338,19 @@ static/index.html        dashboard UI
 sessions/                conversation JSONL files
 reminders.json           persisted reminders
 ```
+
+## Choosing a voice brain
+
+| You want | Pick |
+|---|---|
+| Best all-round offline S2S with tools | `qwen_omni` (GPTQ-Int4) |
+| Natural chat, interrupt anytime | `moshi` (q8, full-duplex + vision) |
+| Emotion/pace steered by voice command | `glm_voice` (int4) |
+| Tool calling + reminders via prompt loop | `voicechat`, `modular`, or `hybrid` |
+| No/weak GPU | `modular` + an online profile |
+
+All fit in 16 GB VRAM one-at-a-time; the server unloads the previous model
+before loading a new one.
 
 ---
 

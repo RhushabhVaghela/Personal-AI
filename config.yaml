@@ -1,23 +1,54 @@
 # PersonalAI-Assistant configuration
-# Provider: voicechat | modular | hybrid
+# Providers: voicechat | modular | hybrid | qwen_omni | glm_voice | moshi
 provider: voicechat
 
-# Profile: local | online-openai | online-groq   (offline-first; online needs API keys in env)
+# Profile (modular provider): local | online-openai | online-groq
+# offline-first; online profiles need OPENAI_API_KEY / GROQ_API_KEY in env
 profile: local
 
-# --- modular pipeline (overridden by profile) ---
+# --- modular pipeline (endpoints overridden by profile) ---
 asr_backend: whisper_server
 llm_base_url: http://127.0.0.1:8081/v1
 llm_model: hy-mt2
 tts_backend: omnivoice        # omnivoice | edge | openai | browser
+tts_engine: edge              # local neural engine: omnivoice | zipvoice |
+                              # vibevoice (used by streaming + speak)
+tts_clone_ref: ""             # path to YOUR voice wav → OmniVoice clones it
+
+# ASR: optional VibeVoice-ASR-BitNet server (realtime ASR on CPU!)
+# point at its OpenAI-compatible endpoint, e.g. http://127.0.0.1:8090
+vibevoice_asr_url: ""
 
 # --- hybrid (vision via separate VLM) ---
 vlm_base_url: http://127.0.0.1:8082/v1
 vlm_model: qwen2-vl
 
-# --- voicechat ---
-voicechat_use_funchead: true
+# --- voicechat (Nemotron) ---
+voicechat_use_funchead: true  # auto-falls back if exe lacks the arch
 voicechat_port: 8123
+voicechat_tts_mode: native    # native (fast, fixed voice) | edge (re-voice
+                              # replies with tts_voice/tts_speed; online)
+
+# --- qwen_omni (Qwen2.5-Omni-7B GPTQ-Int4 — smart S2S w/ tool calling) ---
+qwen_omni_model: Qwen/Qwen2.5-Omni-7B-GPTQ-Int4
+qwen_omni_speaker: Chelsie    # Chelsie | Aiden | Ethan
+qwen_omni_low_vram: true
+
+# --- glm_voice (GLM-4-Voice 9B int4 — emotion/pace steerable) ---
+glm_voice_repo: D:\Agents-and-other-repos\GLM-4-Voice
+glm_voice_dtype: int4         # confirmed working on 12 GB cards
+
+# --- moshi / moshivis (full-duplex realtime + vision) ---
+moshi_backend: rust           # rust (native build) | wsl
+moshi_repo: D:\Agents-and-other-repos\moshi
+moshi_variant: moshika-vis-q8 # q8 = 8.83 GB weights, fits 16 GB w/ KV headroom
+
+# --- Deep Brain (on-demand Qwen3-30B-A3B MoE for 🧠 Deep mode) ---
+deep_model_hf: unsloth/Qwen3-30B-A3B-GGUF:UD-Q4_K_XL
+deep_llm_port: 8082
+deep_gpu_layers: 28           # attention on GPU, experts stream from RAM
+deep_idle_unload_s: 300       # auto-unload after idle → VRAM returned
+deep_pause_s2s: true          # pause the voice model while deep brain runs
 
 # --- audio ---
 push_to_talk_seconds: 0       # 0 = record until Enter
@@ -35,6 +66,7 @@ wake_phrases:                 # transcript gate phrases
 wake_oww_models:              # offline openWakeWord audio models
   - hey_jarvis
   - alexa
+wake_custom_model: ""         # your own trained .onnx wake model (optional)
 
 # --- memory (hours-long conversations) ---
 memory_turns: 24              # rolling context window
@@ -46,10 +78,8 @@ tts_voice: en-US-AriaNeural   # any edge-tts voice name
 tts_speed: 1.0                # 0.5 - 2.0
 backchannel: true             # "mm-hmm?" acks while thinking
 
-# --- reasoning effort (GPT-Live delegation parity) ---
+# --- reasoning effort (🧠 Deep = on-demand big brain) ---
 reasoning_effort: instant     # instant | deep
-deep_llm_base_url: ""         # empty = same LLM endpoint
-deep_llm_model: ""            # bigger model for 'deep' mode
 
 # --- autonomy & safety ---
 autonomy: full                # full | auto_safe | confirm
@@ -59,4 +89,5 @@ kill_switch_keys: ctrl+alt+q
 dashboard_port: 8765
 
 # --- integrations ---
-google_calendar: false     # mirror reminders to Google Calendar (needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS)
+google_calendar: false        # mirror reminders to Google Calendar
+                              # (needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS)
