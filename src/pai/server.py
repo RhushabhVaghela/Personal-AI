@@ -486,7 +486,7 @@ class AssistantSession:
                 None, provider.transcribe, wav)
             await self.send("transcript", text=transcript)
             # GPT-Live-style backchannel while the model thinks
-            asyncio.ensure_future(self._play_backchannel())
+            loop.run_in_executor(None, self._play_backchannel)
             # streaming path: sentence-chunked TTS as the LLM generates
             await self.send("status", text="thinking...")
             t0 = time.time()
@@ -569,6 +569,19 @@ class AssistantSession:
 
     _ack_cache: dict = {}
 
+    def _play_backchannel_sync(self) -> None:
+        """Synthesize the ack clip if not cached (runs in worker thread)."""
+        cfg = self.cfg
+        key = f"{cfg.tts_voice}:{cfg.tts_speed}"
+        mp3 = Path(__import__("tempfile").gettempdir()) / \
+            f"pai_ack_{abs(hash(key)) % 99999}.mp3"
+        if key in self._ack_cache and mp3.exists():
+            return
+        import edge_tts
+        asyncio.run(edge_tts.Communicate(
+            "Mm-hmm?", voice=cfg.tts_voice).save(str(mp3)))
+        self._ack_cache[key] = mp3.read_bytes()
+
     async def _play_backchannel(self) -> None:
         """Play a short acknowledgement clip (cached, best-effort)."""
         try:
@@ -576,17 +589,15 @@ class AssistantSession:
             if not getattr(cfg, "backchannel", True):
                 return
             key = f"{cfg.tts_voice}:{cfg.tts_speed}"
-            mp3 = Path(__import__("tempfile").gettempdir()) / "pai_ack.mp3"
-            if key not in self._ack_cache:
-                if not mp3.exists():
-                    import edge_tts
-                    await edge_tts.Communicate(
-                        "Mm-hmm?", voice=cfg.tts_voice).save(str(mp3))
-                self._ack_cache[key] = mp3.read_bytes()
-            await self.send("backchannel",
-                            data=base64.b64encode(
-                                self._ack_cache[key]).decode(),
-                            format="mp3")
+            mp3 = Path(__import__("tempfile").gettempdir()) / \
+                f"pai_ack_{abs(hash(key)) % 99999}.mp3"
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._play_backchannel_sync)
+            if key in self._ack_cache:
+                await self.send("backchannel",
+                                data=base64.b64encode(
+                                    self._ack_cache[key]).decode(),
+                                format="mp3")
         except Exception as exc:  # noqa: BLE001
             log.debug("backchannel skipped: %s", exc)
 
@@ -611,7 +622,7 @@ class AssistantSession:
             loop = asyncio.get_running_loop()
             await self.send("transcript", text=text)
             # GPT-Live-style backchannel while the model thinks
-            asyncio.ensure_future(self._play_backchannel())
+            loop.run_in_executor(None, self._play_backchannel)
             await self.send("status", text="thinking...")
             result = await loop.run_in_executor(
                 None, provider.think, text, self.executor)
@@ -642,7 +653,8 @@ class AssistantSession:
         async def _synth():
             import edge_tts
             tmp = Path(tempfile.gettempdir()) / "pai_text_input.mp3"
-            await edge_tts.Communicate(text, "en-US-AriaNeural").save(str(tmp))
+            await edge_tts.Communicate(
+                text, voice=self.cfg.tts_voice).save(str(tmp))
             return tmp
 
         mp3 = asyncio.run(_synth())

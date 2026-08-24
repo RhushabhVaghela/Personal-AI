@@ -100,19 +100,9 @@ class ModularProvider:
               screen_context: str = "",
               history: list[dict] | None = None,
               max_rounds: int = 6) -> dict:
-        messages = [{"role": "system",
-                     "content": self.SYSTEM_PROMPT.replace(
-                         "{tools}", json.dumps(pai_tools.tool_schema(), indent=1))}]
-        # hours-long rolling memory
-        for m in self.memory.context():
-            messages.append(m)
+        messages = self._build_messages(transcript, executor, screen_context)
         for m in (history or [])[-8:]:
-            messages.append(m)
-        if screen_context:
-            messages.append({"role": "user",
-                             "content": f"[Screen context] {screen_context}"})
-        messages.append({"role": "user", "content": transcript})
-        self.memory.add("user", transcript)
+            messages.insert(-1, m)   # before the current user turn
 
         for _ in range(max_rounds):
             reply = self._chat(messages)
@@ -242,25 +232,29 @@ class ModularProvider:
         return full
 
     def _tts_one(self, sentence: str, idx: int = 0):
-        """Fast single-sentence TTS → temp file (backend-aware)."""
+        """Fast single-sentence TTS → temp file (honors cfg.tts_engine)."""
         import tempfile
         out = Path(tempfile.gettempdir()) / f"pai_stream_{int(time.time()*1000)}_{idx}"
-        backend = self.cfg.tts_backend
-        if backend == "openai":
-            p = self._openai_tts(sentence, out.with_suffix(".wav"))
-        elif backend == "browser":
-            raise BrowserTTSSignal("browser")
-        else:  # edge (fastest local-ish) / omnivoice fallback
-            try:
-                p = self._edge_tts(sentence, out.with_suffix(".mp3"))
-            except Exception:
-                r = requests.post(
-                    config.OMNIVOICE_BASE_URL + config.OMNIVOICE_TTS_ENDPOINT,
-                    json={"model": "omnivoice", "input": sentence,
-                          "response_format": "wav"}, timeout=60)
-                p = out.with_suffix(".wav")
-                p.write_bytes(r.content)
-        return p
+        engine = getattr(self.cfg, "tts_engine", "edge")
+        if engine in ("omnivoice", "zipvoice", "vibevoice"):
+            from . import tts_engines
+            return tts_engines.synthesize(
+                sentence, out.with_suffix(".wav"), engine=engine,
+                ref_audio=(getattr(self.cfg, "tts_clone_ref", "") or None))
+        if engine == "openai":
+            return self._openai_tts(sentence, out.with_suffix(".mp3"))
+        # edge (default; online but fast)
+        try:
+            return self._edge_tts(sentence, out.with_suffix(".mp3"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("edge TTS failed (%s); trying omnivoice server", exc)
+            r = requests.post(
+                config.OMNIVOICE_BASE_URL + config.OMNIVOICE_TTS_ENDPOINT,
+                json={"model": "omnivoice", "input": sentence,
+                      "response_format": "wav"}, timeout=60)
+            p = out.with_suffix(".wav")
+            p.write_bytes(r.content)
+            return p
 
     def set_effort(self, effort: str) -> None:
         self.cfg.reasoning_effort = effort if effort in ("instant", "deep") \
