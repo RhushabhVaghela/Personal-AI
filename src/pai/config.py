@@ -127,6 +127,15 @@ class Config:
     deep_llm_model: str = ""                 # e.g. a bigger local model or gpt-4o
     # optional Google Calendar mirror for reminders
     google_calendar: bool = False            # needs gcal CLI or GOOGLE_APPLICATION_CREDENTIALS
+    # --- extra S2S providers (all fit 16 GB VRAM with the right quant) ---
+    qwen_omni_model: str = "Qwen/Qwen2.5-Omni-7B-GPTQ-Int4"
+    qwen_omni_speaker: str = "Chelsie"       # Chelsie | Aiden | Ethan
+    qwen_omni_low_vram: bool = True          # module offload pattern
+    glm_voice_repo: str = r"D:\Agents-and-other-repos\GLM-4-Voice"
+    glm_voice_dtype: str = "int4"            # int4 confirmed on 12 GB cards
+    moshi_backend: str = "rust"              # rust | wsl
+    moshi_repo: str = r"D:\Agents-and-other-repos\moshi"
+    moshi_variant: str = "moshika-vis-q8"    # 8.83 GB — see provider docstring
     # autonomy: "confirm" | "auto_safe" | "full"
     autonomy: str = "full"
     kill_switch_keys: str = "ctrl+alt+q"

@@ -16,7 +16,17 @@ def get_provider(name: str | None = None):
     if name == "hybrid":
         from .provider_hybrid import HybridProvider
         return HybridProvider()
+    if name == "qwen_omni":
+        from .provider_qwen_omni import QwenOmniProvider
+        return QwenOmniProvider()
+    if name == "glm_voice":
+        from .provider_glm_voice import GlmVoiceProvider
+        return GlmVoiceProvider()
+    if name == "moshi":
+        from .provider_moshi import MoshiProvider
+        return MoshiProvider()
     raise ValueError(f"unknown provider: {name}")
 
 
-PROVIDERS = ["voicechat", "modular", "hybrid"]
+PROVIDERS = ["voicechat", "modular", "hybrid",
+             "qwen_omni", "glm_voice", "moshi"]
